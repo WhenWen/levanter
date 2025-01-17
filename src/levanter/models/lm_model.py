@@ -1,6 +1,6 @@
 import abc
 from dataclasses import dataclass
-from typing import Generic, Optional, Type, TypeVar
+from typing import Generic, Optional, Type, TypeVar, Any
 
 import draccus
 import equinox as eqx
@@ -235,6 +235,7 @@ def compute_next_token_loss(
     example: LmExample,
     *,
     key=None,
+    label: Optional[Any] = None
     reduction: Optional[hax.ReductionFunction] = hax.mean,
     reduction_axis: Optional[hax.AxisSelection] = None,
     logsumexp_weight: Optional[float] = None,
@@ -246,6 +247,9 @@ def compute_next_token_loss(
     reduced, and the result is a named array with axes (*batch axes, sequence_length).
     """
     activations = model.activations(example.tokens, example.attn_mask, key=key)
+    
+    if label is None:
+        label = example.tokens
 
     loss = maybe_fused_next_token_loss(
         model.Pos,
@@ -253,7 +257,7 @@ def compute_next_token_loss(
         model.Vocab,
         activations,
         model.get_lm_head(),
-        example.tokens,
+        label,
         loss_mask=example.loss_mask,
         reduction=reduction,
         reduction_axis=reduction_axis,
