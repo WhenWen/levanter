@@ -111,7 +111,7 @@ class TrainerState(eqx.Module, Generic[M]):
         opt_state = init_optimizer_for_trainables(optimizer, model, is_trainable)
         return cls(0, model, ema_model, optimizer, opt_state, key, use_ema = use_ema, ema_beta = ema_beta, is_trainable=is_trainable, mp=mp, *args, **kwargs)
 
-    def take_step(self: S, grads: PyTree, obj_fun: Optional[Callable[[M], Scalar]] = None) -> S:
+    def take_step(self: S, grads: PyTree, obj_fun = None, aux_data = None) -> S:
         assert isinstance(self, TrainerState)  # make mypy happy
         model, ema_model, opt_state = take_train_step(
             self.optimizer,
@@ -120,6 +120,7 @@ class TrainerState(eqx.Module, Generic[M]):
             self.opt_state,
             grads,
             obj_fun=obj_fun,
+            aux_data = aux_data,
             is_trainable=self.is_trainable,
             use_ema=self.use_ema,
             ema_beta = self.ema_beta
@@ -202,7 +203,8 @@ def take_train_step(
     opt_state,
     grads,
     *,
-    obj_fun: Optional[Callable[[M], Scalar]] = None,
+    aux_data = None, 
+    obj_fun = None,
     use_ema: bool = True,
     ema_beta: float = 0.995,
     is_trainable: FilterTree = True,
@@ -210,7 +212,7 @@ def take_train_step(
     train_grads = trainables_only(grads, is_trainable)
     overwrites, train_grads = partition_for_grad_overwrite(train_grads)
     trainable_model = trainables_only(model, is_trainable)
-    updates, opt_state = optimizer.update(train_grads, opt_state, params=trainable_model, obj_fn=obj_fun)
+    updates, opt_state = optimizer.update(train_grads, opt_state, params=trainable_model, obj_fn=obj_fun, aux_data=aux_data)
     model = apply_updates(model, updates, overwrites)
     if use_ema:
         ema_model = update_moment(model, ema_model, ema_beta)

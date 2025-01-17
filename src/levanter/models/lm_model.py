@@ -228,14 +228,17 @@ class LmHeadModel(eqx.Module, Generic[LmConfigT]):
     @property
     def vocab_size(self) -> int:
         return self.Vocab.size
-
+class LossAuxData(NamedTuple):
+    logits: NamedArray
+    label: NamedArray
+    loss_fn: Any
 
 def compute_next_token_loss(
     model: LmHeadModel,
     example: LmExample,
     *,
+    label=None,
     key=None,
-    label: Optional[Any] = None
     reduction: Optional[hax.ReductionFunction] = hax.mean,
     reduction_axis: Optional[hax.AxisSelection] = None,
     logsumexp_weight: Optional[float] = None,
@@ -247,17 +250,17 @@ def compute_next_token_loss(
     reduced, and the result is a named array with axes (*batch axes, sequence_length).
     """
     activations = model.activations(example.tokens, example.attn_mask, key=key)
+    logits = hax.dot(activations, model.get_lm_head(), axis=model.Embed)
     
-    if label is None:
+    if label is not None:
         label = example.tokens
-
+    
     loss = maybe_fused_next_token_loss(
         model.Pos,
         model.Embed,
         model.Vocab,
-        activations,
-        model.get_lm_head(),
-        label,
+        logits,
+        example.tokens,
         loss_mask=example.loss_mask,
         reduction=reduction,
         reduction_axis=reduction_axis,
@@ -266,4 +269,4 @@ def compute_next_token_loss(
         block_size=model.config.cross_entropy_block_size,
     )
 
-    return loss
+    return loss, LossAuxData(logits = logits, label = label)

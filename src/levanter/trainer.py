@@ -531,7 +531,7 @@ class Trainer:
         key, new_key = jax.random.split(state.training_key)
         model = inference_mode(state.model, False)
 
-        loss, grads = self._compute_gradients_microbatched(self.loss_fn, model, *batch, **batch_kwargs, key=key)
+        (loss, aux_data), grads = self._compute_gradients_microbatched(self.loss_fn, model, *batch, **batch_kwargs, key=key)
 
         with hax.axis_mapping(self.parameter_axis_mapping):
             if not _no_hooks:
@@ -542,9 +542,9 @@ class Trainer:
             model = eqx.combine(trainable_model, state.model)
             with hax.axis_mapping(self.compute_axis_mapping):
                 model = self.mp.cast_to_compute(model)
-                return self._raw_loss_function(model, *batch, **batch_kwargs, key=key, label = label).scalar()
+                return self._raw_loss_function(model, *batch, **batch_kwargs, key=key, label = label)[0].scalar()
 
-        new_state = state.take_step(grads, obj_fun=obj_fun)
+        new_state = state.take_step(grads, obj_fun=obj_fun, aux_data = aux_data)
         new_state = hax.shard(new_state, self.parameter_axis_mapping)
         if _no_hooks:
             return loss, new_state
@@ -552,7 +552,7 @@ class Trainer:
             return loss, new_state, hook_infos
 
     def _compute_gradients_microbatched(self, loss_fn, model: M, *batch, **batch_kwargs) -> tuple[Scalar, M]:
-        grad_fn = eqx.filter_value_and_grad(loss_fn, has_aux=False)
+        grad_fn = eqx.filter_value_and_grad(loss_fn, has_aux=True)
         mbs = self.config.microbatch_size
         grad_fn = microbatched(
             grad_fn,
