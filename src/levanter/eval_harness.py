@@ -677,6 +677,24 @@ def lm_eval_harness(config: LmEvalHarnessConfig, tokenizer, EvalBatch, axis_reso
 
         log_report_to_tracker("lm_eval", outputs, levanter.tracker.current_tracker())
         logger.info("Logged report to tracker")
+        
+        if(step.use_ema):
+            model = inference_mode(step.state.ema_model, True)
+            logger.info("Running eval harness for ema...")
+            outputs = _actually_run_eval_harness(
+                config,
+                model,
+                tasks_to_run,
+                tokenizer,
+                EvalBatch,
+                axis_resources,
+                mp,
+            )
+            logger.info("Finished running eval harness.")
+
+            log_report_to_tracker("lm_eval/ema", outputs, levanter.tracker.current_tracker())
+            logger.info("Logged report on ema to tracker")
+        
 
         if jax.process_index() == 0:
             # don't delete b/c wandb will sometimes defer upload
