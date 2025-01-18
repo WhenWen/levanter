@@ -61,6 +61,7 @@ class TrainerState(eqx.Module, Generic[M]):
     is_trainable: FilterTree = eqx.field(static=True)
     mp: jmp.Policy = eqx.field(static=True)
     use_ema: FilterTree = eqx.field(static=True)
+    use_schedule_free: FilterTree = eqx.field(static=True)
     ema_beta: Scalar = eqx.field(converter=_ensure_float_is_array)
 
     @property
@@ -92,6 +93,7 @@ class TrainerState(eqx.Module, Generic[M]):
         mp: Optional[jmp.Policy] = None,
         fp8: Fp8Config = None,
         use_ema: FilterTree = True,
+        use_schedule_free: FilterTree = True,
         ema_beta: float = 0.995,
         **kwargs,
     ) -> "TrainerState[M]":
@@ -100,7 +102,7 @@ class TrainerState(eqx.Module, Generic[M]):
         else:
             mp = jmp.get_policy("f32")
 
-        if use_ema:
+        if use_ema or use_schedule_free:
             ema_model = jax.tree_util.tree_map(lambda x: jnp.array(x, copy = True), model)
         else:
             ema_model = None
@@ -109,9 +111,9 @@ class TrainerState(eqx.Module, Generic[M]):
             model = fp8_linear_layers(model, fp8)
 
         opt_state = init_optimizer_for_trainables(optimizer, model, is_trainable)
-        return cls(0, model, ema_model, optimizer, opt_state, key, use_ema = use_ema, ema_beta = ema_beta, is_trainable=is_trainable, mp=mp, *args, **kwargs)
+        return cls(0, model, ema_model, optimizer, opt_state, key, use_ema = use_ema, use_schedule_free = use_schedule_free, ema_beta = ema_beta, is_trainable=is_trainable, mp=mp, *args, **kwargs)
 
-    def take_step(self: S, grads: PyTree, obj_fun = None, hessian_fn = None) -> S:
+    def take_step(self: S, grads: PyTree, obj_fun: Optional[Callable[[M], Scalar]] = None) -> S:
         assert isinstance(self, TrainerState)  # make mypy happy
         model, ema_model, opt_state = take_train_step(
             self.optimizer,
@@ -120,10 +122,10 @@ class TrainerState(eqx.Module, Generic[M]):
             self.opt_state,
             grads,
             obj_fun=obj_fun,
-            hessian_fn = hessian_fn,
             is_trainable=self.is_trainable,
             use_ema=self.use_ema,
-            ema_beta = self.ema_beta
+            ema_beta = self.ema_beta,
+            use_schedule_free=self.use_schedule_free
         )
         return dataclasses.replace(self, model=model, ema_model=ema_model, opt_state=opt_state, step=self.step + 1)
 
@@ -203,19 +205,21 @@ def take_train_step(
     opt_state,
     grads,
     *,
-    obj_fun = None,
-    hessian_fn = None,
+    obj_fun: Optional[Callable[[M], Scalar]] = None,
     use_ema: bool = True,
     ema_beta: float = 0.995,
+    use_schedule_free: bool = True,
     is_trainable: FilterTree = True,
 ) -> Tuple[M, OptState]:
     train_grads = trainables_only(grads, is_trainable)
     overwrites, train_grads = partition_for_grad_overwrite(train_grads)
     trainable_model = trainables_only(model, is_trainable)
-    updates, opt_state = optimizer.update(train_grads, opt_state, params=trainable_model, obj_fn=obj_fun, hessian_fn=hessian_fn)
+    updates, opt_state = optimizer.update(train_grads, opt_state, params=trainable_model, obj_fn=obj_fun)
     model = apply_updates(model, updates, overwrites)
     if use_ema:
         ema_model = update_moment(model, ema_model, ema_beta)
+    elif use_schedule_free:
+        ema_model = optax.contrib.schedule_free_eval_params(opt_state.inner_state, model)
     else:
         ema_model = None
 

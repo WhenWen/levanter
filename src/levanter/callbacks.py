@@ -56,9 +56,8 @@ class StepInfo(Generic[S]):
 
     model = property(lambda self: self.state.model)
     opt_state = property(lambda self: self.state.opt_state)
-
     step = property(lambda self: int(self.state.step) - 1)
-    use_ema = property(lambda self: self.state.use_ema)
+    use_ema = property(lambda self: (self.state.use_ema or self.state.use_schedule_free))
 
     """
     The step that was just completed. If you want the next step, use `next_step`.

@@ -10,6 +10,9 @@ configs:
     train_urls:
       - gs://marin-us-central2/raw/dclm/v2024-07-09-baseline-dedup/**/*.zstd
   # these are just for eval
+  "dclmval":
+    validation_urls:
+      - gs://marin-us-central2/raw/dclm/v2024-07-09-baseline-dedup/global-shard_01_of_10/local-shard_0_of_10/shard_00000000_processed.jsonl.zstd
   "paloma/4chan":
     validation_urls:
       - gs://levanter-data/paloma/4chan_meta_sep/val/val*.jsonl.gz
@@ -60,6 +63,7 @@ configs:
       - gs://levanter-data/paloma/wikitext_103/val/val*.jsonl.gz
 train_weights:
   dclm: 1.0
+  dclmval: 0.0
   paloma/4chan: 0.0
   paloma/c4_100_domains: 0.0
   paloma/c4_en: 0.0

@@ -1,0 +1,32 @@
+data: !include data/dclm_gpt_neo.yaml
+model:
+  type: llama
+  seq_len: 4096
+  hidden_dim: 1536
+  intermediate_dim: 6144
+  num_layers: 24
+  num_heads: 32
+  num_kv_heads: 32
+trainer:
+  tracker:
+    project: "levanter"
+    tags: ["pile", "llama"]
+  mp: p=f32,c=bfloat16
+  model_axis_size: 1
+  checkpointer:
+    keep:
+      - every: 1000
+    save_interval: 30m
+  train_batch_size: 1024
+  per_device_parallelism: 4  # set for v3 TPU
+  per_device_eval_parallelism: 4 # set a larger batch size for eval
+  num_train_steps: 25001
+optimizer:
+  learning_rate: 2E-3 
+  weight_decay: 0.1
+  min_lr_ratio: 0.1
+  warmup: 2000
+  cooldown: 0
+  stable: 0.9
+  haps: [11250, 12500, 22500] 
+  schedule_list: [constant, linear, constant, linear]

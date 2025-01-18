@@ -1,8 +1,5 @@
 eval_harness:
-#  task_spec: ["hellaswag"]
-  task_spec:
-    - task: commonsense_qa  # 5-way multiple-choice questions based on common-sense, everyday scenarios
-      num_fewshot: 1
+  task_spec: ["hellaswag"]
 tokenizer: "gpt2"
 model:
   type: gpt2

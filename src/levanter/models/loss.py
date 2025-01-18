@@ -14,7 +14,8 @@ def maybe_fused_next_token_loss(
     Pos: hax.AxisSelector,
     Embed: hax.AxisSelector,
     Vocab: hax.AxisSelector,
-    logits: NamedArray,
+    pred_embeddings: NamedArray,
+    pred_lm_head: NamedArray,
     true_ids: NamedArray,
     loss_mask: Optional[NamedArray] = None,
     reduction: Optional[hax.ReductionFunction] = hax.mean,
@@ -42,14 +43,42 @@ def maybe_fused_next_token_loss(
         NamedArray: Computed loss.
     """
     # Resolve axes
-    Pos = logits.resolve_axis(Pos.name)
-    Vocab = logits.resolve_axis(Vocab)
-    if dtype is not None:
-        logits = logits.astype(dtype)
+    Pos = pred_embeddings.resolve_axis(Pos)
+    Vocab = pred_lm_head.resolve_axis(Vocab)
+
+    if block_size is None:
+        # Full softmax computation
+        logits = hax.dot(pred_embeddings, pred_lm_head, axis=Embed)
+        if dtype is not None:
+            logits = logits.astype(dtype)
+
+        # Shift target tokens to predict the next token
+        return next_token_loss(Pos, Vocab, logits, true_ids, loss_mask, reduction, reduction_axis, logsumexp_weight)
 
     # Shift target tokens to predict the next token
-    return next_token_loss(Pos, Vocab, logits, true_ids, loss_mask, reduction, reduction_axis, logsumexp_weight)
+    target_y = hax.roll(true_ids, -1, Pos)
 
+    # Create a mask that excludes the last token
+    not_last_loss_mask = 1 - hax.nn.one_hot(-1, Pos, dtype=jnp.float32)  # type: ignore
+    if loss_mask is not None:
+        loss_mask = loss_mask * not_last_loss_mask
+    else:
+        loss_mask = not_last_loss_mask
+
+    # Compute the loss with optional block-wise processing
+    return fused_cross_entropy_loss_and_logsumexp_penalty(
+        pred_embeddings,
+        pred_lm_head,
+        Contract=Embed,
+        Label=Vocab,
+        target_y=target_y,
+        reduction=reduction,
+        reduction_axis=reduction_axis,
+        where=loss_mask,
+        logsumexp_weight=logsumexp_weight,
+        block_size=block_size,
+        dtype=dtype,
+    )
 
 
 def next_token_loss(

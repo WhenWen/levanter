@@ -1,0 +1,6 @@
+  train_urls:
+    - gs://levanter-data-new/raw/Pile/train/{00..29}.jsonl.zst
+  validation_urls:
+    - gs://levanter-data-new/raw/Pile/val.jsonl.zst
+  cache_dir: "gs://levanter-data-new/tokenized/pile-lla/"
+  tokenizer: "NousResearch/Llama-2-7b-hf"

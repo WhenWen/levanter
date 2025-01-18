@@ -44,8 +44,6 @@ from levanter.utils import cloud_utils, fsspec_utils
 from levanter.utils.jax_utils import create_fsdp_mesh, zeros_like_tree
 from levanter.utils.tree_utils import inference_mode
 from levanter.utils.types import ComputeLossFunction, FilterSpec
-from levanter.models.lm_model import compute_logits
-from haliax.nn import cross_entropy_loss
 
 
 logger = pylogging.getLogger(__name__)
@@ -56,8 +54,6 @@ DEFAULT_JAX_CONFIG: Dict[str, JsonAtom] = {
     "jax_threefry_partitionable": True,
     "jax_softmax_custom_jvp": True,
 }
-
-
 
 
 # A note on the semantics of "step" vs "next_step":
@@ -361,6 +357,7 @@ class Trainer:
                 mp=self.mp,
                 fp8=self.fp8,
                 use_ema = self.config.use_ema,
+                use_schedule_free = self.config.use_schedule_free,
                 ema_beta = self.config.ema_beta
             )
             return state
@@ -536,7 +533,6 @@ class Trainer:
         model = inference_mode(state.model, False)
 
         loss, grads = self._compute_gradients_microbatched(self.loss_fn, model, *batch, **batch_kwargs, key=key)
-        
 
         with hax.axis_mapping(self.parameter_axis_mapping):
             if not _no_hooks:
@@ -548,18 +544,8 @@ class Trainer:
             with hax.axis_mapping(self.compute_axis_mapping):
                 model = self.mp.cast_to_compute(model)
                 return self._raw_loss_function(model, *batch, **batch_kwargs, key=key).scalar()
-            
-        def hessian_fn(trainable_model):
-            model = eqx.combine(trainable_model, state.model)
-            with hax.axis_mapping(self.compute_axis_mapping):
-                model = self.mp.cast_to_compute(model)
-                logits = compute_logits(model, *batch, key = key)
-                label = hax.random.categorical(key, logits, axis = model.Vocab)
-                label_full = hax.nn.one_hot(label, model.Vocab, dtype=logits.dtype)
-                return cross_entropy_loss(Label=model.Vocab, logits=logits, targets=label_full, reduction = hax.mean).scalar()
-                
-                
-        new_state = state.take_step(grads, obj_fun=obj_fun, hessian_fn = hessian_fn)
+
+        new_state = state.take_step(grads, obj_fun=obj_fun)
         new_state = hax.shard(new_state, self.parameter_axis_mapping)
         if _no_hooks:
             return loss, new_state
@@ -595,6 +581,7 @@ class TrainerConfig:
     mp: jmp.Policy = jmp.get_policy("f32")  # mixed precision policy
     fp8: Optional[bool | Fp8Config] = None
     use_ema: bool = False
+    use_schedule_free: bool = False
     ema_beta: float = 0.995
     wandb: Optional[tracker.wandb.WandbConfig] = None
     log_dir: Path = Path("logs/")

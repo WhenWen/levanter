@@ -15,18 +15,18 @@ trainer:
   model_axis_size: 1
   checkpointer:
     keep:
-      - every: 100
+      - every: 1000
     save_interval: 30m
     
 
   train_batch_size: 1024
-  per_device_parallelism: 4  # set for v3 TPU
-  per_device_eval_parallelism: 4 # set a larger batch size for eval
-  num_train_steps: 1001
+  per_device_parallelism: 2  # set for v3 TPU
+  per_device_eval_parallelism: 2 # set a larger batch size for eval
+  num_train_steps: 50001
 optimizer:
-  learning_rate: 1E-3 # set low for fine-tuning
+  learning_rate: 4E-3 # set low for fine-tuning
   weight_decay: 0.1
-  min_lr_ratio: 0.1
-  warmup: 1000
-  cooldown: 0.0
+  min_lr_ratio: 0.0
+  warmup: 2000
+  cooldown: 0.4
   lr_schedule: constant

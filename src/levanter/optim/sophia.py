@@ -10,7 +10,6 @@ import optax
 from jax import numpy as jnp
 from jax.random import PRNGKey
 from jaxtyping import PRNGKeyArray
-import haliax as hax
 
 import levanter.tracker
 from levanter.optim.config import HessianOptConfig, OptimizerConfig
@@ -193,7 +192,7 @@ class SophiaGConfig(BaseSophiaConfig):
 
     def compute_hessian(self, fn, model, *batch, hess_key: PRNGKey, **batch_kwargs):
         return stochastic_diag_gauss_newton(fn, model, *batch, **batch_kwargs, hess_key=hess_key)
-#
+
 
 
 @OptimizerConfig.register_subclass("sophia-h")
@@ -312,7 +311,7 @@ def _sophia_gradient_transform(
     initial_key: PRNGKeyArray,
     mu_dtype: Optional[Any] = None,
 ) -> optax.GradientTransformation:
-    mu_dtype = jax.canonicalize_dtype(mu_dtype) if mu_dtype is not None else None
+    mu_dtype = jax.dtypes.canonicalize_dtype(mu_dtype) if mu_dtype is not None else None
 
     def init_fn(params):
         mu = jax.tree_util.tree_map(lambda t: jnp.zeros_like(t, dtype=mu_dtype), params)  # First moment
@@ -321,7 +320,7 @@ def _sophia_gradient_transform(
             count=jnp.zeros([], jnp.int32), hessian_count=jnp.zeros([], jnp.int32), mu=mu, h=h, hess_key=initial_key
         )
 
-    def update_fn(updates, state, params=None, *, obj_fn, hessian_fn, **kwargs):
+    def update_fn(updates, state, params=None, *, obj_fn, **kwargs):
         mu = update_moment(updates, state.mu, b1, 1)
         # nu = update_moment_per_elem_norm(updates, state.nu, b2, 2)
         mu_hat = bias_correction(mu, b1, state.count + 1)
@@ -360,33 +359,15 @@ def _sophia_gradient_transform(
         state = ScaleBySophiaState(
             count=state.count + 1, hessian_count=state.hessian_count, mu=mu, h=h_hat, hess_key=state.hess_key
         )
-        state = update_hessian(state, params, obj_fn=obj_fn, hessian_fn = hessian_fn, **kwargs)
+        state = update_hessian(state, params, obj_fn=obj_fn, **kwargs)
         return updates, state
 
-    def update_hessian(state, params, *, obj_fn, hessian_fn, **kwargs):
+    def update_hessian(state, params, *, obj_fn, **kwargs):
         def _do_update():
             key, next_key = jax.random.split(state.hess_key)
-            loss, pseudo_g = eqx.filter_value_and_grad(lambda m: hessian_fn(m))(params)
-            # Step 6
-            bs = 4096 * 1024
-            g_norm = optax.global_norm(pseudo_g)
-            scale = jnp.minimum(1.0, 1.0 / (g_norm + 1e-6))
-            pseudo_g = jax.tree_map(lambda g: None if g is None else g * scale, 
-                            pseudo_g,
-                            is_leaf=lambda x: x is None
-            )
-            h = jax.tree_util.tree_map(lambda x: bs * x * x , pseudo_g)
-            new_hess = tree_filter_like(state.h, h)
-            new_hess_by_sophiah = stochastic_hessian_diagonal(obj_fn, params, hess_key=key)
-            new_hess_by_sophiah = tree_filter_like(state.h, new_hess_by_sophiah)
-            stats = {
-                'optim/estimate_h': jnp.sqrt(sum(jnp.sum(h**2) for h in jax.tree_util.tree_leaves(new_hess))),
-                'optim/estimate_h_by_hvp': jnp.sqrt(sum(jnp.sum(h**2) for h in jax.tree_util.tree_leaves(new_hess_by_sophiah))),
-                'optim/hessian_loss': loss
-            }
-            
-            levanter.tracker.jit_log(stats, step=state.count - 1)
-            
+            new_hess = sophia_hess_fn(obj_fn, params, hess_key=key, **kwargs)
+
+            new_hess = tree_filter_like(state.h, new_hess)
 
             # EMAs of hessian
             nu = update_moment(new_hess, state.h, b2, 1)
@@ -408,40 +389,36 @@ def _sophia_gradient_transform(
 
 
 # use this for Sophia-G
-# def stochastic_diag_gauss_newton(fn, hessian_fn, model, *args, hess_key: PRNGKey, **kwargs):
-#     """
+def stochastic_diag_gauss_newton(fn, model, *args, hess_key: PRNGKey, **kwargs):
+    """
 
-#     Approximate the diagonal of the Hessian using an approximation to the Gauss Newton matrix.
-#     This is Algorithm 2 of https://arxiv.org/pdf/2305.14342.pdf
+    Approximate the diagonal of the Hessian using an approximation to the Gauss Newton matrix.
+    This is Algorithm 2 of https://arxiv.org/pdf/2305.14342.pdf
 
-#     Args:
-#         fn (SophiaGObjective): objective function
-#         model: model whose Hessian to compute
-#         hess_key: key for sampling
-#         *args, **kwargs: passed to fn's logits
-#     """
-#     # Step 3
-#     logits = hessian_fn.logits
-    
-#     # Step 4
-#     label = hax.random.categorical(hess_key, logits, axis = model.Vocab)
-#     true_label = hax.roll(label, 1, model.Pos)
-        
-    
-    
-#     loss, pseudo_g = eqx.filter_value_and_grad(lambda m: fn(m, true_label))(model)
-    
-    
-#     stats = {
-#         'optim/hessian_loss': loss
-#     }
-#     levanter.tracker.jit_log(stats, step=state.count - 1)
+    Args:
+        fn (SophiaGObjective): objective function
+        model: model whose Hessian to compute
+        hess_key: key for sampling
+        *args, **kwargs: passed to fn's logits
+    """
+    # if not isinstance(fn, SophiaGObjective):
+    #     raise ValueError("objective must be a SophiaGObjective")
 
-#     # Step 6
-#     bs = label.array.size
-#     h = jax.tree_util.tree_map(lambda x: bs * x * x , pseudo_g)
+    # Step 3
+    logits, model_backward = eqx.filter_vjp(lambda model: fn.logits(model, *args, **kwargs), model)
 
-#     return h
+    # Step 4
+    y_hat = fn.sample(logits, key=hess_key)
+
+    # Step 5
+    grad_loss_logits = eqx.filter_grad(fn.loss)(logits, y_hat)
+    pseudo_g = model_backward(grad_loss_logits)[0]
+
+    # Step 6
+    bs = fn.num_data_points()
+    h = jax.tree_util.tree_map(lambda x: x**2 * bs, pseudo_g)
+
+    return h
 
 
 # Use this for Sophia-H
@@ -460,7 +437,7 @@ def stochastic_hessian_diagonal(fn, model, *args, hess_key: PRNGKey, **kwargs):
     # https://arxiv.org/pdf/2208.03268.pdf
     g = tree_gaussian_like(hess_key, model)
     # TODO: consider allowing for n > 1 gaussians?
-    product = hvp(lambda m: fn(m), model, g)
+    product = hvp(lambda m: fn(m, *args, **kwargs), model, g)
     hessian = jax.tree_util.tree_map(lambda grad, gaussian: grad * gaussian, product, g)
 
     return hessian

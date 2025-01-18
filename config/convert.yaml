@@ -1,0 +1,12 @@
+checkpoint_path: gs://marin-us-central2/scratch/kaiyue/checkpoints/muon/llama2_100M_constant/tjo9vxfb/step-26000
+output_dir: gs://marin-us-central2/scratch/kaiyue/checkpoints/muon/llama2_100M_constant/tjo9vxfb/hf/step-26000
+model: 
+  type: llama
+  seq_len: 4096
+  hidden_dim: 768
+  intermediate_dim: 3072
+  num_layers: 12
+  num_heads: 12
+  num_kv_heads: 12
+save_tokenizer: True 
+tokenizer: EleutherAI/gpt-neox-20b
