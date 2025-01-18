@@ -10,6 +10,7 @@ import optax
 from jax import numpy as jnp
 from jax.random import PRNGKey
 from jaxtyping import PRNGKeyArray
+import haliax as hax
 
 import levanter.tracker
 from levanter.optim.config import HessianOptConfig, OptimizerConfig
@@ -368,6 +369,18 @@ def _sophia_gradient_transform(
             new_hess = sophia_hess_fn(obj_fn, aux_data, params, hess_key=key, **kwargs)
 
             new_hess = tree_filter_like(state.h, new_hess)
+            
+            new_hess_by_sophiah = stochastic_hessian_diagonal(obj_fn, aux_data, params, hess_key=key)
+            
+            new_hess_by_sophiah = tree_filter_like(state.h, new_hess_by_sophiah)
+            
+            stats = {
+                'optim/estimate_h': jnp.sqrt(sum(jnp.sum(h**2) for h in jax.tree_util.tree_leaves(new_hess))),
+                'optim/estimate_h_by_hvp': jnp.sqrt(sum(jnp.sum(h**2) for h in jax.tree_util.tree_leaves(new_hess_by_sophiah))),
+            }
+            
+            levanter.tracker.jit_log(stats, step=state.count - 1)
+            
 
             # EMAs of hessian
             nu = update_moment(new_hess, state.h, b2, 1)
@@ -401,23 +414,19 @@ def stochastic_diag_gauss_newton(fn, aux_data, model, *args, hess_key: PRNGKey, 
         hess_key: key for sampling
         *args, **kwargs: passed to fn's logits
     """
-    raise NotImplementedError("This is not implemented yet")
-    # if not isinstance(fn, SophiaGObjective):
-    #     raise ValueError("objective must be a SophiaGObjective")
-
     # Step 3
-    logits, model_backward = eqx.filter_vjp(lambda model: fn.logits(model, *args, **kwargs), model)
-
+    logits = jax.lax.stop_gradient(aux_data.logits)
+    
     # Step 4
-    y_hat = fn.sample(logits, key=hess_key)
+    label = hax.random.categorical(hess_key, logits, axis = model.Vocab)
+    label = hax.roll(label, 1, model.Pos)
 
     # Step 5
-    grad_loss_logits = eqx.filter_grad(fn.loss)(logits, y_hat)
-    pseudo_g = model_backward(grad_loss_logits)[0]
+    pseudo_g = eqx.filter_grad(lambda m: fn(m, label))(model)
 
     # Step 6
-    bs = fn.num_data_points()
-    h = jax.tree_util.tree_map(lambda x: x**2 * bs, pseudo_g)
+    bs = label.array.size
+    h = jax.tree_util.tree_map(lambda x: bs * x * x , pseudo_g)
 
     return h
 

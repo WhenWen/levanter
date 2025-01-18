@@ -44,6 +44,7 @@ from levanter.utils import cloud_utils, fsspec_utils
 from levanter.utils.jax_utils import create_fsdp_mesh, zeros_like_tree
 from levanter.utils.tree_utils import inference_mode
 from levanter.utils.types import ComputeLossFunction, FilterSpec
+from levanter.models.lm_model import compute_logits
 
 
 logger = pylogging.getLogger(__name__)
@@ -54,6 +55,8 @@ DEFAULT_JAX_CONFIG: Dict[str, JsonAtom] = {
     "jax_threefry_partitionable": True,
     "jax_softmax_custom_jvp": True,
 }
+
+
 
 
 # A note on the semantics of "step" vs "next_step":
@@ -531,7 +534,11 @@ class Trainer:
         key, new_key = jax.random.split(state.training_key)
         model = inference_mode(state.model, False)
 
-        (loss, aux_data), grads = self._compute_gradients_microbatched(self.loss_fn, model, *batch, **batch_kwargs, key=key)
+        loss, grads = self._compute_gradients_microbatched(self.loss_fn, model, *batch, **batch_kwargs, key=key)
+        
+        with hax.axis_mapping(self.compute_axis_mapping):
+            model = self.mp.cast_to_compute(model)
+            aux_data = compute_logits(model, *batch)
 
         with hax.axis_mapping(self.parameter_axis_mapping):
             if not _no_hooks:
@@ -542,7 +549,7 @@ class Trainer:
             model = eqx.combine(trainable_model, state.model)
             with hax.axis_mapping(self.compute_axis_mapping):
                 model = self.mp.cast_to_compute(model)
-                return self._raw_loss_function(model, *batch, **batch_kwargs, key=key, label = label)[0].scalar()
+                return self._raw_loss_function(model, *batch, **batch_kwargs, key=key, label = label).scalar()
 
         new_state = state.take_step(grads, obj_fun=obj_fun, aux_data = aux_data)
         new_state = hax.shard(new_state, self.parameter_axis_mapping)
@@ -552,7 +559,7 @@ class Trainer:
             return loss, new_state, hook_infos
 
     def _compute_gradients_microbatched(self, loss_fn, model: M, *batch, **batch_kwargs) -> tuple[Scalar, M]:
-        grad_fn = eqx.filter_value_and_grad(loss_fn, has_aux=True)
+        grad_fn = eqx.filter_value_and_grad(loss_fn, has_aux=False)
         mbs = self.config.microbatch_size
         grad_fn = microbatched(
             grad_fn,

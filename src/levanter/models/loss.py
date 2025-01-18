@@ -42,8 +42,8 @@ def maybe_fused_next_token_loss(
         NamedArray: Computed loss.
     """
     # Resolve axes
-    Pos = pred_embeddings.resolve_axis(Pos.name)
-    Vocab = pred_lm_head.resolve_axis(Vocab)
+    Pos = logits.resolve_axis(Pos.name)
+    Vocab = logits.resolve_axis(Vocab)
     if dtype is not None:
         logits = logits.astype(dtype)
 

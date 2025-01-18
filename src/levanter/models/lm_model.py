@@ -228,10 +228,9 @@ class LmHeadModel(eqx.Module, Generic[LmConfigT]):
     @property
     def vocab_size(self) -> int:
         return self.Vocab.size
-class LossAuxData(NamedTuple):
-    logits: NamedArray
-    label: NamedArray
-    loss_fn: Any
+    
+    
+
 
 def compute_next_token_loss(
     model: LmHeadModel,
@@ -269,4 +268,28 @@ def compute_next_token_loss(
         block_size=model.config.cross_entropy_block_size,
     )
 
-    return loss, LossAuxData(logits = logits, label = label)
+    return loss
+
+from typing import NamedTuple
+class LossAuxData(NamedTuple):
+    logits: NamedArray
+    label: NamedArray
+
+def compute_logits(
+    model: LmHeadModel,
+    example: LmExample,
+    key=None,
+) -> jnp.ndarray | NamedArray:
+    """
+    Computes the cross-entropy loss for a language modeling example. If reduction is not None, the loss is reduced
+    across the reduction axis (with reduction_axis=None meaning all axes). If reduction is None, the loss is not
+    reduced, and the result is a named array with axes (*batch axes, sequence_length).
+    """
+    activations = model.activations(example.tokens, example.attn_mask, key=key)
+    logits = hax.dot(activations, model.get_lm_head(), axis=model.Embed)
+
+
+    return LossAuxData(
+        logits = logits,
+        label = example.tokens
+    )

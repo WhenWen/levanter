@@ -25,14 +25,14 @@ from levanter.utils.types import BlockFoldable
 
 
 silence_transformer_nag()
-from transformers import LlamaConfig as HfLlamaConfig  # noqa: E402
+from transformers import ToyConfig as HfToyConfig  # noqa: E402
 from transformers import PretrainedConfig as HfConfig  # noqa: E402
 
 
-@LmConfig.register_subclass("llama")
+@LmConfig.register_subclass("toy")
 @dataclass(frozen=True)
-class LlamaConfig(HFCompatConfig):
-    """Config for LlamaModel
+class ToyConfig(HFCompatConfig):
+    """Config for ToyModel
 
     Args:
         seq_len (int, optional): maximum length of the input sequence. Defaults to 2048.
@@ -90,20 +90,20 @@ class LlamaConfig(HFCompatConfig):
             self.num_heads % self.num_kv_heads == 0
         ), f"num_heads={self.num_heads} not divisible by num_kv_heads={self.num_kv_heads}."
 
-    def hf_checkpoint_converter(self) -> HFCheckpointConverter["LlamaConfig"]:  # type: ignore
+    def hf_checkpoint_converter(self) -> HFCheckpointConverter["ToyConfig"]:  # type: ignore
         return HFCheckpointConverter(
             self.__class__,
             reference_checkpoint=self.reference_checkpoint,
             trust_remote_code=True,
             tokenizer=self.tokenizer if self.tokenizer else self.reference_checkpoint,
-            HfConfigClass=HfLlamaConfig,
+            HfConfigClass=HfToyConfig,
         )
 
     @classmethod
     def from_hf_config(cls, hf_config: HfConfig):
         rope_theta = hf_config.rope_theta
         rope_config = RotaryEmbeddingsConfig.from_hf_config(rope_theta, hf_config.rope_scaling)
-        return LlamaConfig(
+        return ToyConfig(
             seq_len=hf_config.max_position_embeddings,
             hidden_dim=hf_config.hidden_size,
             intermediate_dim=hf_config.intermediate_size,
@@ -117,22 +117,22 @@ class LlamaConfig(HFCompatConfig):
             rope=rope_config,
         )
 
-    def to_hf_config(self, vocab_size: int, config_overrides: Optional[Dict] = None) -> HfLlamaConfig:
-        """Convert to HuggingFace's LlamaConfig
+    def to_hf_config(self, vocab_size: int, config_overrides: Optional[Dict] = None) -> HfToyConfig:
+        """Convert to HuggingFace's ToyConfig
 
         Args:
             vocab_size (int, optional): Vocabulary size of the tokenizer. Defaults to 32000.
             config_overrides (dict, optional): Overrides for the config. Defaults to None.
 
         Returns:
-            HfLlamaConfig: HuggingFace's LlamaConfig
+            HfToyConfig: HuggingFace's ToyConfig
         """
         if config_overrides is None:
             config_overrides = {}
 
         rope_theta, rope_scaling = self.rope.to_hf_config()
 
-        return HfLlamaConfig(
+        return HfToyConfig(
             max_position_embeddings=self.seq_len,
             hidden_size=self.hidden_dim,
             intermediate_size=self.intermediate_dim,
@@ -151,11 +151,11 @@ class LlamaConfig(HFCompatConfig):
         )
 
     @property
-    def model_type(self) -> Type["LlamaLMHeadModel"]:
-        return LlamaLMHeadModel
+    def model_type(self) -> Type["ToyLMHeadModel"]:
+        return ToyLMHeadModel
 
-    def mk_LayerNorm(self, axis: Axis) -> "LlamaRMSNorm":
-        return LlamaRMSNorm.init(
+    def mk_LayerNorm(self, axis: Axis) -> "ToyRMSNorm":
+        return ToyRMSNorm.init(
             axis, eps=self.layer_norm_epsilon, use_weight=self.use_layer_norm_weight, use_bias=self.use_bias
         )
 
@@ -172,9 +172,9 @@ class LlamaConfig(HFCompatConfig):
         )
 
 
-class LlamaMlp(eqx.Module):
+class ToyMlp(eqx.Module):
     """Multi-layer Perceptron
-    In comparison with GPT2, LlamaMlp adds an up-proj that multiplies with activated gate_proj,
+    In comparison with GPT2, ToyMlp adds an up-proj that multiplies with activated gate_proj,
     before down-proj.
     """
 
@@ -186,7 +186,7 @@ class LlamaMlp(eqx.Module):
     @staticmethod
     def init(
         Embed: Axis, Mlp: Axis, activation_fn: Union[str, Callable], *, key, use_bias: bool = False
-    ) -> "LlamaMlp":
+    ) -> "ToyMlp":
         k_fc, k_up_proj, k_down_proj = jrandom.split(key, 3)
         gate_proj = hnn.Linear.init(Out=Mlp, In=Embed, key=k_fc, use_bias=use_bias, out_first=True)
         up_proj = hnn.Linear.init(Out=Mlp, In=Embed, key=k_up_proj, use_bias=use_bias, out_first=True)
@@ -194,7 +194,7 @@ class LlamaMlp(eqx.Module):
         if isinstance(activation_fn, str):
             activation_fn = ACT2FN[activation_fn]
         act = activation_fn  # type: ignore
-        return LlamaMlp(gate_proj, up_proj, down_proj, act)
+        return ToyMlp(gate_proj, up_proj, down_proj, act)
 
     @named_call
     def __call__(self, x: NamedArray, *, key=None) -> NamedArray:
@@ -206,15 +206,15 @@ class LlamaMlp(eqx.Module):
         return outputs
 
 
-class LlamaAttention(eqx.Module):
-    config: LlamaConfig = eqx.static_field()
+class ToyAttention(eqx.Module):
+    config: ToyConfig = eqx.static_field()
     q_proj: hnn.Linear  # projection from Embed to query
     k_proj: hnn.Linear  # projection from Embed to key
     v_proj: hnn.Linear  # projection from Embed to value
     o_proj: hnn.Linear  # projection from Heads to output
 
     @staticmethod
-    def init(config: LlamaConfig, *, key) -> "LlamaAttention":
+    def init(config: ToyConfig, *, key) -> "ToyAttention":
         use_bias = config.use_bias
         Embed = config.Embed
         QHeadsPerGroup = hax.Axis("q_heads_per_group", config.num_heads // config.num_kv_heads)
@@ -232,7 +232,7 @@ class LlamaAttention(eqx.Module):
         o_proj = hnn.Linear.init(
             In=(config.Heads, config.HeadSize), Out=Embed, key=k_o, use_bias=use_bias, out_first=True
         )
-        return LlamaAttention(config, q_proj, k_proj, v_proj, o_proj)
+        return ToyAttention(config, q_proj, k_proj, v_proj, o_proj)
 
     @named_call
     def __call__(self, x: NamedArray, mask: Optional[NamedArray | AttentionMask], *, key=None) -> NamedArray:
@@ -271,7 +271,7 @@ class LlamaAttention(eqx.Module):
         return attn_output
 
 
-class LlamaRMSNorm(eqx.Module):
+class ToyRMSNorm(eqx.Module):
     """
     Similar to LayerNorm, but uses the RMS of the input along the specified axis (or axes) instead of variance.
     """
@@ -294,7 +294,7 @@ class LlamaRMSNorm(eqx.Module):
         else:
             bias = None
 
-        return LlamaRMSNorm(axis, weight, bias, eps, dtype)
+        return ToyRMSNorm(axis, weight, bias, eps, dtype)
 
     def __call__(self, x: NamedArray) -> NamedArray:
         # This gives a different result than jnp.var(), which is
@@ -315,19 +315,19 @@ class LlamaRMSNorm(eqx.Module):
         return out.astype(in_dtype)
 
 
-class LlamaDecoderLayer(eqx.Module):
-    config: LlamaConfig = eqx.static_field()
-    self_attn: LlamaAttention
-    mlp: LlamaMlp
-    input_layernorm: LlamaRMSNorm
-    post_attention_layernorm: LlamaRMSNorm
+class ToyDecoderLayer(eqx.Module):
+    config: ToyConfig = eqx.static_field()
+    self_attn: ToyAttention
+    mlp: ToyMlp
+    input_layernorm: ToyRMSNorm
+    post_attention_layernorm: ToyRMSNorm
 
     @staticmethod
-    def init(config: LlamaConfig, *, key) -> "LlamaDecoderLayer":
+    def init(config: ToyConfig, *, key) -> "ToyDecoderLayer":
         k_attn, k_mlp = jrandom.split(key, 2)
 
-        attn = LlamaAttention.init(config, key=k_attn)
-        mlp = LlamaMlp.init(
+        attn = ToyAttention.init(config, key=k_attn)
+        mlp = ToyMlp.init(
             config.Embed,
             config.Mlp,
             config.activation_function,
@@ -337,7 +337,7 @@ class LlamaDecoderLayer(eqx.Module):
         ln_1 = config.mk_LayerNorm(config.Embed)
         ln_2 = config.mk_LayerNorm(config.Embed)
 
-        return LlamaDecoderLayer(config, attn, mlp, ln_1, ln_2)
+        return ToyDecoderLayer(config, attn, mlp, ln_1, ln_2)
 
     @named_call
     def __call__(self, x: NamedArray, mask: Optional[NamedArray | AttentionMask], *, key=None) -> NamedArray:
@@ -356,26 +356,26 @@ class LlamaDecoderLayer(eqx.Module):
         return output
 
 
-class LlamaTransformer(eqx.Module):
-    config: LlamaConfig = eqx.static_field()
-    layers: BlockFoldable[LlamaDecoderLayer]
-    norm: LlamaRMSNorm
+class ToyTransformer(eqx.Module):
+    config: ToyConfig = eqx.static_field()
+    layers: BlockFoldable[ToyDecoderLayer]
+    norm: ToyRMSNorm
 
     @staticmethod
-    def init(config: LlamaConfig, *, key) -> "LlamaTransformer":
+    def init(config: ToyConfig, *, key) -> "ToyTransformer":
         S = Stacked
         if not config.scan_layers:
             from haliax.nn.scan import BlockSeq
 
             S = BlockSeq
 
-        layers = S.init(config.Layers, LlamaDecoderLayer, gradient_checkpointing=config.gradient_checkpointing)(
+        layers = S.init(config.Layers, ToyDecoderLayer, gradient_checkpointing=config.gradient_checkpointing)(
             config,
             key=shaped_rng_split(key, config.num_layers),
         )
         ln_f = config.mk_LayerNorm(config.Embed)
 
-        return LlamaTransformer(config, layers, ln_f)
+        return ToyTransformer(config, layers, ln_f)
 
     @named_call
     def __call__(self, x: NamedArray, attn_mask: Optional[NamedArray | AttentionMask], *, key) -> NamedArray:
@@ -386,18 +386,18 @@ class LlamaTransformer(eqx.Module):
         return x
 
 
-class LlamaEmbedding(ModuleWithStateDictSerialization, eqx.Module):
+class ToyEmbedding(ModuleWithStateDictSerialization, eqx.Module):
     """Similar to GPT2 Embedding, except that:
-    - Llama doesn't have position embedding in the Embedding layer.
-    - Llama doesn't use dropout.
+    - Toy doesn't have position embedding in the Embedding layer.
+    - Toy doesn't use dropout.
     """
 
     Vocab: Axis = eqx.static_field()
     token_embeddings: hnn.Embedding
 
     @staticmethod
-    def init(Vocab: Axis, config: LlamaConfig, *, key) -> "LlamaEmbedding":
-        return LlamaEmbedding(Vocab, hnn.Embedding.init(Vocab, config.Embed, key=key))
+    def init(Vocab: Axis, config: ToyConfig, *, key) -> "ToyEmbedding":
+        return ToyEmbedding(Vocab, hnn.Embedding.init(Vocab, config.Embed, key=key))
 
     @named_call
     def embed(self, input_ids, *args):
@@ -416,9 +416,9 @@ class LlamaEmbedding(ModuleWithStateDictSerialization, eqx.Module):
         return dataclasses.replace(self, Vocab=self.Vocab.resize(new_size), token_embeddings=new_weights)
 
 
-class LlamaLMHeadModel(ModuleWithStateDictSerialization, LmHeadModel[LlamaConfig]):
-    transformer: LlamaTransformer
-    embeddings: LlamaEmbedding
+class ToyLMHeadModel(ModuleWithStateDictSerialization, LmHeadModel[ToyConfig]):
+    transformer: ToyTransformer
+    embeddings: ToyEmbedding
     lm_head: Optional[hnn.Linear]
 
     @property
@@ -434,16 +434,15 @@ class LlamaLMHeadModel(ModuleWithStateDictSerialization, LmHeadModel[LlamaConfig
         return self.embeddings.Vocab
 
     @classmethod
-    def init(cls, Vocab: Axis, config: LlamaConfig, *, key) -> "LlamaLMHeadModel":
+    def init(cls, Vocab: Axis, config: ToyConfig, *, key) -> "ToyLMHeadModel":
         k_t, k_emb = jrandom.split(key, 2)
-        transformer = LlamaTransformer.init(config, key=k_t)
-        embeddings = LlamaEmbedding.init(Vocab, config, key=k_emb)
+        embeddings = ToyEmbedding.init(Vocab, config, key=k_emb)
         if config.tie_word_embeddings:
             lm_head = None
         else:
             lm_head = hnn.Linear.init(In=config.Embed, Out=Vocab, key=k_emb, use_bias=False, out_first=True)
 
-        return LlamaLMHeadModel(transformer, embeddings, lm_head)
+        return ToyLMHeadModel(transformer, embeddings, lm_head)
 
     def __call__(
         self,
@@ -462,7 +461,6 @@ class LlamaLMHeadModel(ModuleWithStateDictSerialization, LmHeadModel[LlamaConfig
         """
         k_t, k_head = maybe_rng_split(key, 2)
         x = self.embeddings.embed(input_ids)
-        x = self.transformer(x, attn_mask=attn_mask, key=k_t)
         if self.lm_head:
             lm_logits = self.lm_head(x, key=k_head)
         else:
@@ -484,8 +482,6 @@ class LlamaLMHeadModel(ModuleWithStateDictSerialization, LmHeadModel[LlamaConfig
 
         """
         x = self.embeddings.embed(input_ids)
-        x = self.transformer(x, attn_mask=attn_mask, key=key)
-
         return x
 
     def get_lm_head(self) -> hax.NamedArray:
@@ -494,7 +490,7 @@ class LlamaLMHeadModel(ModuleWithStateDictSerialization, LmHeadModel[LlamaConfig
         else:
             return self.lm_head.weight
 
-    def resize_vocab(self, new_size: int, key=None) -> "LmHeadModel[LlamaConfig]":
+    def resize_vocab(self, new_size: int, key=None) -> "LmHeadModel[ToyConfig]":
         new_Vocab = self.Vocab.resize(new_size)
         k1, k2 = maybe_rng_split(key, 2)
         new_embeddings = self.embeddings.resize_embeddings(new_size, key=k1)
