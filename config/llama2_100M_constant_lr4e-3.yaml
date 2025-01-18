@@ -22,11 +22,11 @@ trainer:
   train_batch_size: 1024
   per_device_parallelism: 2  # set for v3 TPU
   per_device_eval_parallelism: 2 # set a larger batch size for eval
-  num_train_steps: 50001
+  num_train_steps: 10001
 optimizer:
   learning_rate: 4E-3 # set low for fine-tuning
   weight_decay: 0.1
   min_lr_ratio: 0.0
   warmup: 2000
-  cooldown: 0.4
-  lr_schedule: constant
+  cooldown: 0.0
+  lr_schedule: linear

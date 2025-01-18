@@ -78,16 +78,6 @@ while true; do
       # run the command
       echo "Running command on VM $VM_NAME"
       echo "gcloud compute tpus tpu-vm ssh --zone=$ZONE $VM_NAME --command='$CMD_ARGS_STR' --worker=all"
-      gcloud compute tpus tpu-vm ssh $VM_NAME --zone $ZONE --worker=all --command 'rm -r levanter/config'
-      gcloud compute tpus tpu-vm scp --recurse config $VM_NAME:levanter/config --zone $ZONE --worker=all
-      gcloud compute tpus tpu-vm scp src/levanter/trainer.py  $VM_NAME:levanter/src/levanter/trainer.py  --zone $ZONE --worker=all
-      gcloud compute tpus tpu-vm scp src/levanter/trainer_state.py  $VM_NAME:levanter/src/levanter/trainer_state.py  --zone $ZONE --worker=all
-      gcloud compute tpus tpu-vm scp src/levanter/models/lm_model.py  $VM_NAME:levanter/src/levanter/models/lm_model.py  --zone $ZONE --worker=all
-      gcloud compute tpus tpu-vm scp src/levanter/models/loss.py  $VM_NAME:levanter/src/levanter/models/loss.py  --zone $ZONE --worker=all
-      gcloud compute tpus tpu-vm scp src/levanter/optim/sophia.py  $VM_NAME:levanter/src/levanter/optim/sophia.py  --zone $ZONE --worker=all
-      gcloud compute tpus tpu-vm scp src/levanter/optim/__init__.py  $VM_NAME:levanter/src/levanter/optim/__init__.py  --zone $ZONE --worker=all
-      gcloud compute tpus tpu-vm scp src/levanter/models/llama.py  $VM_NAME:levanter/src/levanter/models/llama.py  --zone $ZONE --worker=all  
-      gcloud compute tpus tpu-vm scp src/levanter/models/toy.py  $VM_NAME:levanter/src/levanter/models/toy.py  --zone $ZONE --worker=all    
       gcloud compute tpus tpu-vm ssh --zone=$ZONE $VM_NAME --command="$CMD_ARGS_STR" --worker=all
       EXIT_CODE=$?
       if [ $EXIT_CODE -eq 0 ]; then
