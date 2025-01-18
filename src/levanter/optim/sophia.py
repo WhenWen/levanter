@@ -191,8 +191,8 @@ class BaseSophiaConfig(HessianOptConfig):
 class SophiaGConfig(BaseSophiaConfig):
     gamma: float = GAMMA_SOPHIA_G
 
-    def compute_hessian(self, fn, aux_data, model, *batch, hess_key: PRNGKey, **batch_kwargs):
-        return stochastic_diag_gauss_newton(fn, aux_data, model, *batch, **batch_kwargs, hess_key=hess_key)
+    def compute_hessian(self, fn, model, *batch, hess_key: PRNGKey, **batch_kwargs):
+        return stochastic_diag_gauss_newton(fn, model, *batch, **batch_kwargs, hess_key=hess_key)
 #
 
 
@@ -201,8 +201,8 @@ class SophiaGConfig(BaseSophiaConfig):
 class SophiaHConfig(BaseSophiaConfig):
     gamma: float = GAMMA_SOPHIA_H
 
-    def compute_hessian(self, fn, aux_data, model, *batch, hess_key: PRNGKey, **batch_kwargs):
-        return stochastic_hessian_diagonal(fn, aux_data, model, *batch, **batch_kwargs, hess_key=hess_key)
+    def compute_hessian(self, fn, model, *batch, hess_key: PRNGKey, **batch_kwargs):
+        return stochastic_hessian_diagonal(fn, model, *batch, **batch_kwargs, hess_key=hess_key)
 
 
 def sophia_h(
@@ -321,7 +321,7 @@ def _sophia_gradient_transform(
             count=jnp.zeros([], jnp.int32), hessian_count=jnp.zeros([], jnp.int32), mu=mu, h=h, hess_key=initial_key
         )
 
-    def update_fn(updates, state, params=None, *, obj_fn, aux_data, **kwargs):
+    def update_fn(updates, state, params=None, *, obj_fn, hessian_fn, **kwargs):
         mu = update_moment(updates, state.mu, b1, 1)
         # nu = update_moment_per_elem_norm(updates, state.nu, b2, 2)
         mu_hat = bias_correction(mu, b1, state.count + 1)
@@ -360,23 +360,29 @@ def _sophia_gradient_transform(
         state = ScaleBySophiaState(
             count=state.count + 1, hessian_count=state.hessian_count, mu=mu, h=h_hat, hess_key=state.hess_key
         )
-        state = update_hessian(state, params, obj_fn=obj_fn, aux_data = aux_data, **kwargs)
+        state = update_hessian(state, params, obj_fn=obj_fn, hessian_fn = hessian_fn, **kwargs)
         return updates, state
 
-    def update_hessian(state, params, *, obj_fn, aux_data, **kwargs):
+    def update_hessian(state, params, *, obj_fn, hessian_fn, **kwargs):
         def _do_update():
             key, next_key = jax.random.split(state.hess_key)
-            new_hess = sophia_hess_fn(obj_fn, aux_data, params, hess_key=key, **kwargs)
-
-            new_hess = tree_filter_like(state.h, new_hess)
-            
-            new_hess_by_sophiah = stochastic_hessian_diagonal(obj_fn, aux_data, params, hess_key=key)
-            
+            loss, pseudo_g = eqx.filter_value_and_grad(lambda m: hessian_fn(m))(params)
+            # Step 6
+            bs = 4096 * 1024
+            g_norm = optax.global_norm(pseudo_g)
+            scale = jnp.minimum(1.0, 1.0 / (g_norm + 1e-6))
+            pseudo_g = jax.tree_map(lambda g: None if g is None else g * scale, 
+                            pseudo_g,
+                            is_leaf=lambda x: x is None
+            )
+            h = jax.tree_util.tree_map(lambda x: bs * x * x , pseudo_g)
+            new_hess = tree_filter_like(state.h, h)
+            new_hess_by_sophiah = stochastic_hessian_diagonal(obj_fn, params, hess_key=key)
             new_hess_by_sophiah = tree_filter_like(state.h, new_hess_by_sophiah)
-            
             stats = {
                 'optim/estimate_h': jnp.sqrt(sum(jnp.sum(h**2) for h in jax.tree_util.tree_leaves(new_hess))),
                 'optim/estimate_h_by_hvp': jnp.sqrt(sum(jnp.sum(h**2) for h in jax.tree_util.tree_leaves(new_hess_by_sophiah))),
+                'optim/hessian_loss': loss
             }
             
             levanter.tracker.jit_log(stats, step=state.count - 1)
@@ -402,37 +408,44 @@ def _sophia_gradient_transform(
 
 
 # use this for Sophia-G
-def stochastic_diag_gauss_newton(fn, aux_data, model, *args, hess_key: PRNGKey, **kwargs):
-    """
+# def stochastic_diag_gauss_newton(fn, hessian_fn, model, *args, hess_key: PRNGKey, **kwargs):
+#     """
 
-    Approximate the diagonal of the Hessian using an approximation to the Gauss Newton matrix.
-    This is Algorithm 2 of https://arxiv.org/pdf/2305.14342.pdf
+#     Approximate the diagonal of the Hessian using an approximation to the Gauss Newton matrix.
+#     This is Algorithm 2 of https://arxiv.org/pdf/2305.14342.pdf
 
-    Args:
-        fn (SophiaGObjective): objective function
-        model: model whose Hessian to compute
-        hess_key: key for sampling
-        *args, **kwargs: passed to fn's logits
-    """
-    # Step 3
-    logits = jax.lax.stop_gradient(aux_data.logits)
+#     Args:
+#         fn (SophiaGObjective): objective function
+#         model: model whose Hessian to compute
+#         hess_key: key for sampling
+#         *args, **kwargs: passed to fn's logits
+#     """
+#     # Step 3
+#     logits = hessian_fn.logits
     
-    # Step 4
-    label = hax.random.categorical(hess_key, logits, axis = model.Vocab)
-    label = hax.roll(label, 1, model.Pos)
+#     # Step 4
+#     label = hax.random.categorical(hess_key, logits, axis = model.Vocab)
+#     true_label = hax.roll(label, 1, model.Pos)
+        
+    
+    
+#     loss, pseudo_g = eqx.filter_value_and_grad(lambda m: fn(m, true_label))(model)
+    
+    
+#     stats = {
+#         'optim/hessian_loss': loss
+#     }
+#     levanter.tracker.jit_log(stats, step=state.count - 1)
 
-    # Step 5
-    pseudo_g = eqx.filter_grad(lambda m: fn(m, label))(model)
+#     # Step 6
+#     bs = label.array.size
+#     h = jax.tree_util.tree_map(lambda x: bs * x * x , pseudo_g)
 
-    # Step 6
-    bs = label.array.size
-    h = jax.tree_util.tree_map(lambda x: bs * x * x , pseudo_g)
-
-    return h
+#     return h
 
 
 # Use this for Sophia-H
-def stochastic_hessian_diagonal(fn, aux_data, model, *args, hess_key: PRNGKey, **kwargs):
+def stochastic_hessian_diagonal(fn, model, *args, hess_key: PRNGKey, **kwargs):
     """Compute the diagonal of the Hessian of a function using a normal distribution.
 
     https://arxiv.org/pdf/2305.14342.pdf Algorithm 1
@@ -447,7 +460,7 @@ def stochastic_hessian_diagonal(fn, aux_data, model, *args, hess_key: PRNGKey, *
     # https://arxiv.org/pdf/2208.03268.pdf
     g = tree_gaussian_like(hess_key, model)
     # TODO: consider allowing for n > 1 gaussians?
-    product = hvp(lambda m: fn(m, aux_data.label), model, g)
+    product = hvp(lambda m: fn(m), model, g)
     hessian = jax.tree_util.tree_map(lambda grad, gaussian: grad * gaussian, product, g)
 
     return hessian

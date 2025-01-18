@@ -45,6 +45,7 @@ from levanter.utils.jax_utils import create_fsdp_mesh, zeros_like_tree
 from levanter.utils.tree_utils import inference_mode
 from levanter.utils.types import ComputeLossFunction, FilterSpec
 from levanter.models.lm_model import compute_logits
+from haliax.nn import cross_entropy_loss
 
 
 logger = pylogging.getLogger(__name__)
@@ -536,22 +537,29 @@ class Trainer:
 
         loss, grads = self._compute_gradients_microbatched(self.loss_fn, model, *batch, **batch_kwargs, key=key)
         
-        with hax.axis_mapping(self.compute_axis_mapping):
-            model = self.mp.cast_to_compute(model)
-            aux_data = compute_logits(model, *batch)
 
         with hax.axis_mapping(self.parameter_axis_mapping):
             if not _no_hooks:
                 hook_infos = self.hooks.run_jit_hooks(state, grads, force=False)
 
         # Sophia needs to be able to access the loss function in the optimizer
-        def obj_fun(trainable_model, label):
+        def obj_fun(trainable_model):
             model = eqx.combine(trainable_model, state.model)
             with hax.axis_mapping(self.compute_axis_mapping):
                 model = self.mp.cast_to_compute(model)
-                return self._raw_loss_function(model, *batch, **batch_kwargs, key=key, label = label).scalar()
-
-        new_state = state.take_step(grads, obj_fun=obj_fun, aux_data = aux_data)
+                return self._raw_loss_function(model, *batch, **batch_kwargs, key=key).scalar()
+            
+        def hessian_fn(trainable_model):
+            model = eqx.combine(trainable_model, state.model)
+            with hax.axis_mapping(self.compute_axis_mapping):
+                model = self.mp.cast_to_compute(model)
+                logits = compute_logits(model, *batch, key = key)
+                label = hax.random.categorical(key, logits, axis = model.Vocab)
+                label_full = hax.nn.one_hot(label, model.Vocab, dtype=logits.dtype)
+                return cross_entropy_loss(Label=model.Vocab, logits=logits, targets=label_full, reduction = hax.mean).scalar()
+                
+                
+        new_state = state.take_step(grads, obj_fun=obj_fun, hessian_fn = hessian_fn)
         new_state = hax.shard(new_state, self.parameter_axis_mapping)
         if _no_hooks:
             return loss, new_state

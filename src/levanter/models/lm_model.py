@@ -251,7 +251,7 @@ def compute_next_token_loss(
     activations = model.activations(example.tokens, example.attn_mask, key=key)
     logits = hax.dot(activations, model.get_lm_head(), axis=model.Embed)
     
-    if label is not None:
+    if label is None:
         label = example.tokens
     
     loss = maybe_fused_next_token_loss(
@@ -274,6 +274,7 @@ from typing import NamedTuple
 class LossAuxData(NamedTuple):
     logits: NamedArray
     label: NamedArray
+    logits_fn: Any
 
 def compute_logits(
     model: LmHeadModel,
@@ -285,11 +286,9 @@ def compute_logits(
     across the reduction axis (with reduction_axis=None meaning all axes). If reduction is None, the loss is not
     reduced, and the result is a named array with axes (*batch axes, sequence_length).
     """
+    
     activations = model.activations(example.tokens, example.attn_mask, key=key)
     logits = hax.dot(activations, model.get_lm_head(), axis=model.Embed)
+    
+    return logits
 
-
-    return LossAuxData(
-        logits = logits,
-        label = example.tokens
-    )

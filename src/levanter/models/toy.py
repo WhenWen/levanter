@@ -25,7 +25,7 @@ from levanter.utils.types import BlockFoldable
 
 
 silence_transformer_nag()
-from transformers import ToyConfig as HfToyConfig  # noqa: E402
+from transformers import LlamaConfig as HfToyConfig  # noqa: E402
 from transformers import PretrainedConfig as HfConfig  # noqa: E402
 
 
