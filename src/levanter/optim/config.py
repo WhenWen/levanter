@@ -3,10 +3,12 @@ import re
 import warnings
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, Optional
+from typing import Optional
+
 import draccus
 import equinox as eqx
 import jax
+import numpy as np
 import optax
 from jax import numpy as jnp
 
@@ -19,21 +21,26 @@ from levanter.utils.jax_utils import leaf_key_paths
 @dataclass
 class OptimizerConfig(draccus.ChoiceRegistry, abc.ABC):
     learning_rate: float = 6e-4
-    weight_decay: float = 0.0
+    weight_decay: float = 0.1
 
     min_lr_ratio: float = 0.1
-    warmup_ratio: Optional[float] = None  # Deprecated. fraction of training steps to use as warmup
     """The lr scheduler operates on 4 stages: [warmup] - {[stable] - [decay]} x haps - [cooldown]"""
-    warmup: float = 0.01
+    warmup: int | float = 0.01
     """fraction of training steps to use as warmup, or steps to use. 0.0 means no warmup"""
-    stable: float = 0.00
-    """fraction of training steps to use as stable, or steps to use. 0.0 means no stable"""
-    cooldown: float = 0.0
-    """fraction of training steps to use as cooldown, or steps to use. 0.0 means no cooldown"""
+    decay: int | float | None = None
+    """fraction of training steps to use as decay, or steps to use. None means full decay"""
+    rewarmup: int | float = 0.0
+    "If using a cycle, how much of the cycle to use as re-warmup. 0.0 means no re-warmup."
+    cooldown: Optional[float] = None
+    """Deprecated, as its semantics are confusing."""
+    cycle_length: int | float | None | list[int] = None
+    """ Length of cycle. If <= 1, it is treated as a fraction of the total number of steps. None is equivalent to 1.0."""
+    cycles: int | list[int] | None = None
+    """Number of cycles or a list of cycle endpoints. Can use at most one of cycle_length, cycles, or haps."""
+
     lr_schedule: str = "cosine"  # constant, cosine, linear
     haps: Optional[list[int]] = None
-    schedule_list: Optional[list[str]] = None
-    """list of integers indicating pit stop steps. See paper https://openreview.net/pdf?id=RSsavSvAvN"""
+    """Deprecated."""
     weight_decay_modules: Optional[list[str] | str] = None
     """A regex or a list of strings to identify where to mask weight.
     For nano-GPT, this field can be set as `r".*attn.*weight|.*mlp.*weight|.*token_embeddings|.*position_embeddings"`"""
@@ -139,31 +146,47 @@ class OptimizerConfig(draccus.ChoiceRegistry, abc.ABC):
             return mask_fn
 
     def lr_scheduler(self, num_train_steps):
-        warmup_steps = self._convert_warmup(num_train_steps)
-        cooldown_steps = _convert_ratio_or_steps(self.cooldown, num_train_steps)
-        if self.haps is None:
-            self.haps = []
-            self.schedule_list = [self.lr_schedule]
-        self.haps.insert(0, warmup_steps)
-        self.haps.append(num_train_steps - cooldown_steps)
+        if self.cooldown is not None:
+            warnings.warn("cooldown is deprecated. Just use the normal schedule.", DeprecationWarning)
+            cooldown_steps = _convert_frac_or_steps(self.cooldown, num_train_steps)
+        else:
+            cooldown_steps = 0
+
+        total_main_steps = num_train_steps - cooldown_steps
+        cooldown_points = self._get_cycle_minima(total_main_steps)
 
         min_lr = self.learning_rate * self.min_lr_ratio
 
         schedules = []
         boundaries = []
 
-        if warmup_steps != 0:
-            warmup = optax.linear_schedule(0.0, self.learning_rate, warmup_steps)
-            schedules.append(warmup)
-            boundaries.append(warmup_steps)
+        previous_end = 0.0
 
-        for i, (start, end) in enumerate(zip(self.haps[:-1], self.haps[1:])):
+        for cycle, (start, end) in enumerate(zip(cooldown_points[:-1], cooldown_points[1:])):
             cycle_steps = end - start
-            lr_decay_steps = cycle_steps
-            schedule_type = self.schedule_list[i]
-            match schedule_type:
-                case "warmup":
-                    schedule = optax.linear_schedule(0.0, self.learning_rate, lr_decay_steps)
+            if cycle == 0:  # warmup
+                warmup_steps = _convert_frac_or_steps(self.warmup, cycle_steps)
+            else:
+                warmup_steps = _convert_frac_or_steps(self.rewarmup, cycle_steps)
+
+            if warmup_steps != 0:
+                warmup = optax.linear_schedule(previous_end, self.learning_rate, warmup_steps)
+                schedules.append(warmup)
+                boundaries.append(start + warmup_steps)
+
+            lr_decay_steps = (
+                _convert_frac_or_steps(self.decay, cycle_steps)
+                if self.decay is not None
+                else cycle_steps - warmup_steps
+            )
+            stable_steps = cycle_steps - warmup_steps - lr_decay_steps
+
+            if stable_steps != 0:
+                stable = optax.constant_schedule(self.learning_rate)
+                schedules.append(stable)
+                boundaries.append(start + warmup_steps + stable_steps)
+
+            match self.lr_schedule:
                 case "constant":
                     schedule = optax.constant_schedule(self.learning_rate)
                 case "cosine":
@@ -177,6 +200,8 @@ class OptimizerConfig(draccus.ChoiceRegistry, abc.ABC):
                 case _:
                     raise ValueError(f"Unknown lr_schedule: {self.lr_schedule}")
 
+            previous_end = schedule(lr_decay_steps)
+
             schedules.append(schedule)
             boundaries.append(end)
 
@@ -187,15 +212,50 @@ class OptimizerConfig(draccus.ChoiceRegistry, abc.ABC):
 
         if len(schedules) > 1:
             schedule = optax.join_schedules(schedules, boundaries)
+        else:
+            schedule = schedules[0]
 
         return schedule
 
-    def _convert_warmup(self, num_train_steps: int):
-        if self.warmup_ratio is not None:
-            warnings.warn("warmup_ratio is deprecated. Use warmup instead")
-            return int(self.warmup_ratio * num_train_steps)
+    def _get_cycle_minima(self, total_main_steps):
+        if self.cycle_length is not None:
+            if self.cycles is not None:
+                raise ValueError("Can't use both cycle_length and cycles.")
+            if self.haps is not None:
+                warnings.warn("haps is deprecated. Use cycles instead.", DeprecationWarning)
+                raise ValueError("Can't use both cycle_length and haps.")
+
+            if isinstance(self.cycle_length, int | float):
+                cycle_length = _convert_frac_or_steps(self.cycle_length, total_main_steps)
+                cooldown_points = [i * cycle_length for i in range(1, total_main_steps // cycle_length)]
+                if total_main_steps % cycle_length != 0:
+                    warnings.warn(
+                        "Cycle length does not divide total number of steps. The last cycle will be shorter."
+                    )
+
+            elif isinstance(self.cycle_length, list):
+                lengths = np.array(self.cycle_length)
+                steps = np.cumsum(lengths)
+                if steps[-1] > total_main_steps:
+                    raise ValueError(f"Cycle lengths exceed total number of steps: {steps[-1]} > {total_main_steps}")
+                cooldown_points = steps.tolist()
+            else:
+                raise ValueError("Invalid cycle_length. Must be a fraction, number of steps, or a list of steps.")
+
+        elif self.haps is not None:
+            warnings.warn("haps is deprecated. Use cycles instead.", DeprecationWarning)
+            cooldown_points = list(self.haps)
+        elif isinstance(self.cycles, int):
+            # insert a warmup then the rest of the steps
+            cooldown_points = [int(total_main_steps / self.cycles * (i + 1)) for i in range(self.cycles - 1)]
+        elif isinstance(self.cycles, list):
+            cooldown_points = list(self.cycles)
         else:
-            return _convert_ratio_or_steps(self.warmup, num_train_steps)
+            cooldown_points = []
+
+        cooldown_points.insert(0, 0)
+        cooldown_points.append(total_main_steps)
+        return cooldown_points
 
 
 def _inv_sqrt_decay_schedule(lr: float, min_lr: float, warmup_steps: int, timescale: float = 10000):
@@ -214,11 +274,14 @@ def _inv_decay_schedule(lr: float, min_lr: float, decay_steps: int):
     return schedule
 
 
-def _convert_ratio_or_steps(ratio_or_steps: float, num_train_steps: int):
-    if ratio_or_steps < 1.0:
-        return int(ratio_or_steps * num_train_steps)
-    else:
-        return int(ratio_or_steps)
+def _convert_frac_or_steps(frac_or_steps: float | int, num_train_steps: int):
+    # if it's greater than 1, it must be a whole number of steps
+    if frac_or_steps < 0.0 or (frac_or_steps > 1.0 and frac_or_steps % 1 != 0):
+        raise ValueError(f"Invalid fraction {frac_or_steps}. Must be between 0 and 1. You can also use (whole) steps.")
+    if frac_or_steps <= 1.0:
+        return int(frac_or_steps * num_train_steps)
+
+    return int(frac_or_steps)
 
 
 @dataclass
@@ -230,15 +293,12 @@ class HessianOptConfig(OptimizerConfig, abc.ABC):
 @OptimizerConfig.register_subclass("adam")
 @dataclass
 class AdamConfig(OptimizerConfig):
-    weight_decay: float = 0.1
     beta1: float = 0.9
     # cf https://docs.mosaicml.com/projects/composer/en/latest/api_reference/generated/composer.optim.DecoupledAdamW.html
     # https://x.com/giffmana/status/1692641748445438301
     beta2: float = 0.95
     epsilon: float = 1e-8
     max_grad_norm: Optional[float] = 1.0
-    haps: Optional[list[int]] = None
-    schedule_list: Optional[list[str]] = None
 
     def build(self, num_train_steps):
         """Creates the optimizer"""
@@ -262,5 +322,3 @@ class AdamConfig(OptimizerConfig):
             return optimizer
 
         return optax.inject_hyperparams(_optimizer)(learning_rate=self.lr_scheduler(num_train_steps))
-
-
