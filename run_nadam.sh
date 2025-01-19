@@ -6,4 +6,5 @@ levanter/src/levanter/main/train_lm.py \
 --config_path levanter/config/llama2_100M_constant_lr4e-3.yaml  \
 --trainer.checkpointer.base_path  gs://marin-us-central2/scratch/kaiyue/checkpoints/nadam/lr8e-3_step50000  \
 --optimizer.learning_rate 8e-3 \
---optimizer.type nadam
+--optimizer.type la \
+--optimizer.gamma 0.05
