@@ -39,6 +39,7 @@ class OptimizerConfig(draccus.ChoiceRegistry, abc.ABC):
     """Number of cycles or a list of cycle endpoints. Can use at most one of cycle_length, cycles, or haps."""
 
     lr_schedule: str = "cosine"  # constant, cosine, linear
+    stable_lr_schedule: str = "constant"
     haps: Optional[list[int]] = None
     """Deprecated."""
     weight_decay_modules: Optional[list[str] | str] = None
@@ -180,23 +181,39 @@ class OptimizerConfig(draccus.ChoiceRegistry, abc.ABC):
                 else cycle_steps - warmup_steps
             )
             stable_steps = cycle_steps - warmup_steps - lr_decay_steps
-
+            
+            
+            final_stable_lr = self.learning_rate
             if stable_steps != 0:
-                stable = optax.constant_schedule(self.learning_rate)
+                match self.stable_lr_schedule:
+                    case "constant":
+                        stable = optax.constant_schedule(self.learning_rate)
+                    case "cosine":
+                        stable = optax.cosine_decay_schedule(self.learning_rate, lr_decay_steps, self.min_lr_ratio)
+                    case "linear":
+                        stable = optax.linear_schedule(self.learning_rate, min_lr, lr_decay_steps)
+                    case "inv_sqrt":
+                        stable = _inv_sqrt_decay_schedule(self.learning_rate, min_lr, warmup_steps, 10000)
+                    case "inv":
+                        stable = _inv_decay_schedule(self.learning_rate, min_lr, lr_decay_steps)
+                    case _:
+                        raise ValueError(f"Unknown lr_schedule: {self.lr_schedule}")
                 schedules.append(stable)
                 boundaries.append(start + warmup_steps + stable_steps)
-
+                final_stable_lr = stable(stable_steps)
+                
+                
             match self.lr_schedule:
                 case "constant":
-                    schedule = optax.constant_schedule(self.learning_rate)
+                    schedule = optax.constant_schedule(final_stable_lr)
                 case "cosine":
-                    schedule = optax.cosine_decay_schedule(self.learning_rate, lr_decay_steps, self.min_lr_ratio)
+                    schedule = optax.cosine_decay_schedule(final_stable_lr, lr_decay_steps, self.min_lr_ratio)
                 case "linear":
-                    schedule = optax.linear_schedule(self.learning_rate, min_lr, lr_decay_steps)
+                    schedule = optax.linear_schedule(final_stable_lr, min_lr, lr_decay_steps)
                 case "inv_sqrt":
-                    schedule = _inv_sqrt_decay_schedule(self.learning_rate, min_lr, warmup_steps, 10000)
+                    schedule = _inv_sqrt_decay_schedule(final_stable_lr, min_lr, warmup_steps, 10000)
                 case "inv":
-                    schedule = _inv_decay_schedule(self.learning_rate, min_lr, lr_decay_steps)
+                    schedule = _inv_decay_schedule(final_stable_lr, min_lr, lr_decay_steps)
                 case _:
                     raise ValueError(f"Unknown lr_schedule: {self.lr_schedule}")
 
