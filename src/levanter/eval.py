@@ -195,18 +195,14 @@ def cb_tagged_lm_evaluate(
     def eval_callback(step: StepInfo):
         results = dict()
         with levanter.tracker.capture_time() as time_fn:
-            original_result = evaluator.evaluate(step.model)
-            results[prefix] = original_result
-            if(step.use_ema):
-                results[_join_prefix(prefix, 'ema')] = evaluator.evaluate(step.state.ema_model)
-            
-        for p, result in results.items():
-            log_dict = {
-                # log micro average as just "loss"
-                _join_prefix(p, "loss"): result.micro_avg_loss,
-                _join_prefix(p, "loading_time"): result.total_eval_loading_time,
-                _join_prefix(p, "total_time"): time_fn(),
-            }
+            result = evaluator.evaluate(step.eval_model)
+
+        log_dict = {
+            # log micro average as just "loss"
+            _join_prefix(prefix, "loss"): result.micro_avg_loss,
+            _join_prefix(prefix, "loading_time"): result.total_eval_loading_time,
+            _join_prefix(prefix, "total_time"): time_fn(),
+        }
 
             logger.info(f"{p} loss: {result.micro_avg_loss:.3f}")
             has_tags = len(evaluator.dataset.tag_to_index) > 1  # 1 tag means there's no difference between micro and macro

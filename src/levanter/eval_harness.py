@@ -68,88 +68,27 @@ from levanter.utils.tree_utils import inference_mode
 logger = logging.getLogger(__name__)
 
 
-class EvalDataset(AsyncDataset[LmExample]):
-    def __init__(self, Pos, tokenizer, examples: list[Instance]):
-        super().__init__()
-        self.examples = examples
-        self.Pos = Pos
+# OK, so LM-Eval-Harness is not deterministic. This means we can't just run it on different workers and expect the
+# order of requests to be the same. Sorting doesn't even seem to be correct (?!?!?) so we need to only run it on one
+# process.
+# This is our design:
+# 1. Process 0 creates an LevanterHarnessLM object.
+# 2. On all processes, we start a loop that waits for a request using jnp_broadcast_one_to_all
+# 3. When a request is received (and it's not STOP) we process the request. The results are broadcast to all
+#    devices, and process 0 records htem.
+# 4. When a STOP request is received, we stop the loop and process 0 returns the results.
+
+
+class _LmEvalHarnessWorker:
+    """
+    Worker for running the LM Eval Harness. Each worker process will run a copy of this class.
+    The head process will run the main harness and dispatch requests to the workers while the
+    others run in a loop waiting for requests.
+    """
+
+    def __init__(self, EvalBatch, EvalPos, model, axis_resources, tokenizer, mp, max_packed_segments):
         self.tokenizer = tokenizer
-
-    async def async_len(self) -> int:
-        return len(self.examples)
-
-    async def final_length_is_known(self) -> bool:
-        return True
-
-    def is_finite(self) -> bool:
-        return True
-
-    async def current_len(self) -> Optional[int]:
-        return len(self.examples)
-
-    async def get_batch(self, indices: Sequence[int]) -> List[LmExample]:
-        out = []
-        pad_token_id = self.tokenizer.pad_token_id
-
-        # lm-harness specs that args are (context, completion)
-        reqs = [(self.examples[i].args[0], self.examples[i].args[1]) for i in indices]
-
-        for context, completion in reqs:
-            # it's kinda annoying we run tokenization twice, but it's the easiest way to get the prompt length
-            # CF: https://github.com/EleutherAI/lm-evaluation-harness/blob/main/lm_eval/api/model.py#L354
-            whole_enc = self.tokenizer(context + completion)
-            context_enc = self.tokenizer(context)
-
-            context_enc_len = len(context_enc["input_ids"])
-
-            tokens, length = self._truncate_or_pad(whole_enc, context_enc_len)
-            example = _jit_create_example(self.Pos, tokens, length, pad_token_id)
-
-            out.append(example)
-
-        return out
-
-    def _truncate_or_pad(self, encoded: list[int], prompt_length: int):
-        """
-        Truncate or pad the encoded sequence to the maximum length of the model.
-        Truncates from the beginning of the sequence, so that the completion is preserved.
-
-        Returns:
-            Truncated or padded sequence and the prompt length. The prompt length can be shorter than the original
-            length if the input was truncated.
-        """
-        if self.tokenizer.pad_token_id is None:
-            self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
-
-        ex_pad = self.tokenizer.pad(
-            encoded,
-            padding="max_length",
-            max_length=self.Pos.size,
-            return_tensors="np",
-        )
-
-        truncated = ex_pad["input_ids"][-self.Pos.size :]
-        # if we truncated the prompt, we need to adjust the prompt length
-        if len(truncated) < len(encoded):
-            prompt_length -= len(encoded) - len(truncated)
-            if prompt_length < 0:
-                prompt_length = 0
-                logger.warning("Prompt length is negative after truncation. Setting to 0.")
-
-        return truncated, prompt_length
-
-
-class LevanterHarnessLM(LM):
-    def __init__(
-        self,
-        EvalBatch: hax.Axis,
-        EvalPos: hax.Axis,
-        model: LmHeadModel,
-        axis_resources,
-        tokenizer,
-        mp: jmp.Policy | None,
-    ):
-        super().__init__()
+        self.max_packed_segments = max_packed_segments
         self.EvalBatch = EvalBatch
         self.EvalPos = EvalPos
         self.model = model
@@ -201,25 +140,60 @@ class LevanterHarnessLM(LM):
         Downstream tasks should attempt to use loglikelihood instead of other
         LM calls whenever possible.
         """
-        # pad requests to be a multiple of the batch size
-        initial_length = len(requests)
-        dataset = self._pad_dataset_to_batch_size(requests)
+        if self.tokenizer.pad_token_id is None:
+            logger.warning("No pad token set. Setting to eos token.")
+            self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
-        mesh = haliax.partitioning._get_mesh()
+        packed_iterator = _pack_requests(requests, self.tokenizer, self.EvalPos, self.leader.max_packed_segments)
+        packed_iterator = self.stack_batches(packed_iterator, self.EvalBatch)
+        packed_iterator = BackgroundIterator(packed_iterator, max_capacity=1024)
 
-        loader = DataLoader(
-            self.EvalBatch, dataset, max_buffered_batches=1024, mesh=mesh, axis_resources=self.axis_resources
-        )
+        result_probs = np.zeros(len(requests))
+        result_greedy = np.zeros(len(requests))
+        covered_points = np.zeros(len(requests), dtype=bool)
 
-        result: list[tuple[float, bool]] = []
-        for batch in tqdm(loader, desc="Loglikelihood", unit="ba"):
-            out_lls, out_correct = self._jit_loglikelihood(self.model, batch)
-            result.extend((ll.item(), correct.item()) for ll, correct in zip(out_lls.array, out_correct.array))
+        total_padding = 0
+        total_tokens = 0
+        pbar = tqdm(total=len(requests), desc="Loglikelihood", unit="req")
+        for q, batch in enumerate(packed_iterator):
+            segments_this_batch = _get_segments_this_batch(
+                batch, self.leader.max_packed_segments * self.EvalBatch.size
+            )
 
-        assert len(result) >= initial_length
-        # skip padding
-        result = result[:initial_length]
+            padding_count, batch_tokens = _get_padding_count(batch, self.tokenizer.pad_token_id)
 
+            out_ids, out_lls, out_correct = self.leader.dispatch_loglikelihood(batch)
+
+            out_ids = np.array(out_ids.array)
+            out_lls = np.array(out_lls.array)
+            out_correct = np.array(out_correct.array)
+            # -1's are going to be where we had too few sequences to fill a batch
+            valid_indices = out_ids != -1
+
+            out_ids_this_batch = out_ids[valid_indices].tolist()
+
+            missing_ids = set(segments_this_batch) - set(out_ids_this_batch)
+            extra_ids = set(out_ids_this_batch) - set(segments_this_batch)
+            assert len(missing_ids) == 0, f"Missing segments: {missing_ids}"
+            assert len(extra_ids) == 0, f"Extra segments: {extra_ids}"
+
+            result_probs[out_ids[valid_indices]] = out_lls[valid_indices]
+            result_greedy[out_ids[valid_indices]] = out_correct[valid_indices]
+            covered_points[out_ids[valid_indices]] = True
+
+            total_padding += padding_count
+            total_tokens += batch_tokens
+
+            pbar.set_postfix(
+                padding=f"{total_padding}/{total_tokens} = {(total_padding) / (total_tokens):.2f}",
+                this_padding=f"{padding_count}/{batch_tokens}= {padding_count / batch_tokens:.2f}",
+            )
+            pbar.update(len(segments_this_batch))
+
+        missing_points = np.where(~covered_points)[0]
+        assert len(missing_points) == 0, f"Missing points: {missing_points}"
+
+        result = list(zip(result_probs, result_greedy))
         logger.info(f"Finished running {len(requests)} loglikelihoods.")
 
         return result
@@ -323,11 +297,14 @@ class LmEvalHarnessConfig:
                 else:
                     our_name = task.get("task_alias", task["task"]) if isinstance(task, dict) else task
                     our_name = our_name.replace(" ", "_")
-                    this_task = self._get_task_and_rename(manager, our_name, task)
-                    this_tasks[our_name] = this_task
-            except Exception:
+                    tasks_for_this_task_spec = self._get_task_and_rename(manager, our_name, task)
+                    for k, v in tasks_for_this_task_spec.items():
+                        if k in this_tasks:
+                            raise ValueError(f"Task {k} already exists")
+                        this_tasks[k] = v
+            except Exception as e:
                 logger.exception(f"Failed to load task {task}")
-                raise ValueError(f"Failed to load task {task}")
+                raise ValueError(f"Failed to load task {task}") from e
 
         logger.info(f"Loaded {len(this_tasks)} tasks")
         return this_tasks
@@ -340,11 +317,83 @@ class LmEvalHarnessConfig:
         """
         import lm_eval.tasks as tasks
 
+        task_name = task if isinstance(task, str) else task["task"]
+
         task_dict = tasks.get_task_dict([task], manager)
-        this_task = task_dict.popitem()[1]
-        # hacky, but this allows us to run multiple instances of the same task with different fewshot settings
-        this_task.config.task = our_name
+        assert len(task_dict) == 1, f"Expected 1 task, got {len(task_dict)}"
+        try:
+            this_task = self._rename_tasks_for_eval_harness(task_dict, task_name, our_name)
+        except AttributeError:
+            logger.exception(f"Failed to rename task {task}: {task_dict}")
+            raise ValueError(f"Failed to rename task {task}: {task_dict}")
         return this_task
+
+    def _rename_tasks_for_eval_harness(self, this_task, lm_eval_task_name, our_name):
+        import lm_eval.tasks as tasks
+
+        # hacky, but this allows us to run multiple instances of the same task with different fewshot settings
+        if isinstance(this_task, dict):
+            out = {}
+            for k, v in this_task.items():
+                v = self._rename_tasks_for_eval_harness(v, lm_eval_task_name, our_name)
+
+                if isinstance(k, tasks.ConfigurableGroup):
+                    k._config.group = self._replace_name_with_our_name(k.group, lm_eval_task_name, our_name)
+                    out[k] = v
+                elif isinstance(k, str):
+                    k = self._replace_name_with_our_name(k, lm_eval_task_name, our_name)
+                    if isinstance(v, dict):
+                        subtask_list = self._get_child_tasks(v)
+                        # ok so inexplicably, lm_eval_harness doesn't wrap the key in a ConfigurableGroup when you pass
+                        # in a task dict (it seems like a mistake), so we need to do that here
+                        # subtask is the name of all of the child tasks in v
+                        group = tasks.ConfigurableGroup(config={"group": k, "task": subtask_list})
+                        out[group] = v
+                    else:
+                        out[k] = v
+                else:
+                    raise ValueError(f"Unknown key type: {k}")
+
+            return out
+
+        elif isinstance(this_task, tasks.ConfigurableTask):
+            this_task.config.task = self._replace_name_with_our_name(
+                this_task.config.task, lm_eval_task_name, our_name
+            )
+            return this_task
+        else:
+            raise ValueError(f"Unknown task type: {this_task}")
+
+    def _replace_name_with_our_name(self, lm_eval_name, lm_eval_prefix, our_name_prefix):
+        if our_name_prefix.startswith(lm_eval_prefix):
+            suffix = our_name_prefix[len(lm_eval_prefix) :]
+            prefix = lm_eval_prefix
+        else:
+            suffix = ""
+            prefix = our_name_prefix
+        if lm_eval_prefix in lm_eval_name:
+            lm_eval_name = lm_eval_name.replace(lm_eval_prefix, prefix) + suffix
+        else:
+            lm_eval_name = prefix + "_" + lm_eval_name + suffix
+        return lm_eval_name
+
+    def _get_child_tasks(self, task_group):
+        import lm_eval.tasks as tasks
+
+        out = []
+        for k, v in task_group.items():
+            if isinstance(k, tasks.ConfigurableGroup):
+                subtask_or_tasks = k.config.task
+                if isinstance(subtask_or_tasks, str):
+                    out.append(subtask_or_tasks)
+                else:
+                    out.extend(subtask_or_tasks)
+            elif isinstance(k, str):
+                out.append(k)
+            else:
+                raise ValueError(f"Unknown key type: {k}")
+
+        return out
 
 
 @dataclass(frozen=True)
@@ -446,15 +495,14 @@ def _compute_averages(outputs):
     for task_results in outputs["results"].values():
         metric_keys.update(k for k in task_results.keys() if "stderr" not in k and k != "alias")
 
-    examples_per_task = [task_samples["effective"] for task_samples in outputs["n-samples"].values()]
-
     # Compute macro and micro averages
     for metric in metric_keys:
         # Collect valid tasks for this metric
+        # We iterate over the n-samples because real tasks (as opposed to aggregates like "mmlu") have counts
         valid_tasks = [
-            (task_results.get(metric), examples_per_task[i])
-            for i, (task_name, task_results) in enumerate(outputs["results"].items())
-            if metric in task_results
+            (outputs["results"][task_name].get(metric), outputs["n-samples"][task_name]["effective"])
+            for task_name in outputs["n-samples"]
+            if outputs["results"][task_name].get(metric, None) is not None
         ]
 
         if not valid_tasks:
@@ -660,9 +708,9 @@ def lm_eval_harness(config: LmEvalHarnessConfig, tokenizer, EvalBatch, axis_reso
 
     def lm_eval_harness(step: StepInfo, force=False):
         if step.step == 0 and not force:
-            return  # don't run eval on the first step
+            return
 
-        model = inference_mode(step.model, True)
+        model = step.eval_model
         logger.info("Running eval harness...")
         outputs = _actually_run_eval_harness(
             config,
@@ -709,6 +757,91 @@ def lm_eval_harness(config: LmEvalHarnessConfig, tokenizer, EvalBatch, axis_reso
                 logger.info("Uploaded results to tracker")
 
     return lm_eval_harness
+
+
+# lifted from lm-eval simple_evaluate
+def _adjust_config(task_dict, fewshot_random_seed=0):
+    adjusted_task_dict = {}
+    for task_name, task_obj in task_dict.items():
+        if isinstance(task_obj, dict):
+            adjusted_task_dict = {
+                **adjusted_task_dict,
+                **{task_name: _adjust_config(task_obj, fewshot_random_seed=fewshot_random_seed)},
+            }
+
+        else:
+            # fewshot_random_seed set for tasks, even with a default num_fewshot (e.g. in the YAML file)
+            task_obj.set_fewshot_seed(seed=fewshot_random_seed)
+
+            adjusted_task_dict[task_name] = task_obj
+
+    return adjusted_task_dict
+
+
+def _iterate_tokenized_requests(
+    requests: list[Instance], tokenizer: HfTokenizer, max_len: int, batch_size: int
+) -> Iterator[PromptCompletion]:
+    """
+    Tokenize the requests and yield them as PromptCompletions, for packing into LmExamples.
+    """
+    # Separate contexts and completions
+    contexts = [request.args[0] for request in requests]
+    completions = [request.args[1] for request in requests]
+
+    # Combine contexts and completions for full tokenization
+    combined_texts = [context + completion for context, completion in zip(contexts, completions)]
+
+    # Batch tokenization for combined and context separately
+    for batch_indices in batched(range(len(requests)), batch_size):
+        # Extract batch data
+        combined_batch = [combined_texts[i] for i in batch_indices]
+        context_batch = [contexts[i] for i in batch_indices]
+
+        # Tokenize batched inputs
+        combined_encodings = tokenizer(combined_batch, truncation=False, padding=False)
+        context_encodings = tokenizer(context_batch, truncation=False, padding=False)
+
+        for off in range(len(batch_indices)):
+            i = batch_indices[off]
+            context_enc = context_encodings["input_ids"][off]
+            all_enc = combined_encodings["input_ids"][off]
+
+            context_enc_len = len(context_enc)
+
+            if len(all_enc) > max_len:
+                logger.warning(f"Request {i} is too long. Truncating.")
+                # Truncate from the left
+                context_enc_len = len(context_enc) - (len(all_enc) - max_len)
+                all_enc = all_enc[-max_len:]
+                if context_enc_len < 0:
+                    context_enc_len = 0
+                    logger.warning("Prompt length is negative after truncation. Setting to 0.")
+
+            yield PromptCompletion(ids=all_enc, prompt_length=context_enc_len, segment_id=i)
+
+
+def _pack_requests(
+    requests: list[Instance], tokenizer: HfTokenizer, Pos: hax.Axis, max_pack_size: int
+) -> Iterator[LmExample]:
+    packed_iterator = _iterate_tokenized_requests(requests, tokenizer, Pos.size, batch_size=128)
+    # TODO: use a better packing algorithm?
+    yield from pack_prompt_completions(
+        Pos,
+        packed_iterator,
+        max_segments_per_example=max_pack_size,
+        pad_token=tokenizer.pad_token_id,
+        max_buffered_examples=16,
+    )
+
+
+def _make_dummy_batch(EvalBatch, EvalPos):
+    dummy_batch = hax.vmap(LmExample.causal, EvalBatch)(
+        hax.zeros(EvalPos, dtype=jnp.int32),
+        loss_mask=hax.zeros(EvalPos, dtype=jnp.int32),
+        segment_ids=hax.zeros(EvalPos, dtype=jnp.int32),
+    )
+    out = hax.shard(dummy_batch, {})
+    return out
 
 
 if __name__ == "__main__":
