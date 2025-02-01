@@ -87,7 +87,7 @@ def scale_by_soap(
     b2: float = 0.95,
     shampoo_beta: float = -1,
     eps: float = 1e-8,
-    precondition_frequency: int = 10,
+    precondition_frequency: int = 1,
     max_precond_dim: int = 10000,
     precision: jax.lax.PrecisionLike = jax.lax.Precision.HIGHEST,
     mu_dtype: Optional[Any] = None,
@@ -133,35 +133,7 @@ def scale_by_soap(
             ),
             params,
             is_leaf=lambda x: isinstance(x, hax.nn.Stacked),
-        )
-        
-        dim_diag = jax.tree.map(
-            lambda g, s: _get_preconditioner_types(
-                g.shape[int(s) :],
-                max_size_triangular,
-                min_ndim_triangular,
-                memory_save_mode,
-            ),
-            momentum_updates,
-            scanned_layers_,
-        )
-        merged_shapes = jax.tree.map(
-            lambda p, s: p.shape[int(s) :], params, scanned_layers_
-        )
-        if merge_small_dims:
-            raise NotImplementedError
-        partitioned_shapes = merged_shapes
-        if partition_grads_into_blocks:
-            partitioners = jax.tree.map(
-                lambda _, ps: BlockPartitioner(ps, block_size),
-                params,
-                merged_shapes,
-            )
-            # we can grab resulting shapes from partitioners
-            partitioned_shapes = jax.tree.map(
-                lambda _, p_cls: p_cls._padded_stacked_shape, params, partitioners
-            )
-        
+        )        
         exp_avg = otu.tree_zeros_like(params, dtype=mu_dtype)
         exp_avg_sq = otu.tree_zeros_like(params, dtype=mu_dtype)
         GG = [

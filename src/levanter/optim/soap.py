@@ -37,8 +37,6 @@ class SoapConfig(OptimizerConfig):
     max_precond_dim: int = 10000
     mu_dtype: Optional[Any] = None
     precond_dtype: Optional[Any] = None
-    merge_small_dims: bool = True
-    target_merged_dim_size: int = 8192
     partition_grads_into_blocks: bool = True
     block_size: int = 256
     def build(self, num_train_steps):
@@ -58,8 +56,6 @@ class SoapConfig(OptimizerConfig):
             max_precond_dim=self.max_precond_dim,
             mu_dtype=self.mu_dtype,
             precond_dtype=self.precond_dtype,
-            merge_small_dims=self.merge_small_dims,
-            target_merged_dim_size=self.target_merged_dim_size,
             partition_grads_into_blocks=self.partition_grads_into_blocks,
             block_size=self.block_size,
             ))
@@ -87,15 +83,13 @@ def scale_by_soap(
     b2: float = 0.95,
     shampoo_beta: float = -1,
     eps: float = 1e-8,
-    precondition_frequency: int = 10,
+    precondition_frequency: int = 1,
     max_precond_dim: int = 10000,
     precision: jax.lax.PrecisionLike = jax.lax.Precision.HIGHEST,
     mu_dtype: Optional[Any] = None,
     precond_dtype: Optional[Any] = None,
-    merge_small_dims: bool = True,
-    target_merged_dim_size: int = 8192,
-    partition_grads_into_blocks: bool = True,
-    block_size: int = 256
+    partition_grads_into_blocks: Optional[Any] = True,
+    block_size: Optional[Any] = 256
 ) -> GradientTransformation:
     """
     Implements SOAP algorithm (https://arxiv.org/abs/2409.11321). Based on the original implementation at https://github.com/nikhilvyas/SOAP.
@@ -135,6 +129,23 @@ def scale_by_soap(
             is_leaf=lambda x: isinstance(x, hax.nn.Stacked),
         )        
         exp_avg = otu.tree_zeros_like(params, dtype=mu_dtype)
+        
+        
+        # if partition_grads_into_blocks:
+        #     partitioners = jax.tree.map(
+        #         lambda _, ps, dd: BlockPartitioner(ps, block_size, dd),
+        #         params,
+        #         merged_shapes,
+        #         dim_diag,
+        #     )
+        #     # we can grab resulting shapes from partitioners
+        #     partitioned_shapes = jax.tree.map(
+        #         lambda _, p_cls: p_cls._padded_stacked_shape, params, partitioners
+        #     )
+
+        
+        
+        
         exp_avg_sq = otu.tree_zeros_like(params, dtype=mu_dtype)
         GG = [
             init_conditioner(
@@ -471,6 +482,7 @@ def init_conditioner(p: Array, max_precond_dim: int, dtype: Optional[Any]) -> Li
 
     return [jnp.zeros((s, s), dtype = dtype) if s <= max_precond_dim else None for s in p.shape]
 
+import numpy as np
 
 class BlockPartitioner:
     """Partitions a tensor into smaller tensors.

@@ -61,6 +61,6 @@ from .rmsprop import (
     ScaleByRMSPropMomState
 )
 
-# from .soap import (
-#     SoapConfig
-# )
+from .soap import (
+    SoapConfig
+)
