@@ -331,7 +331,7 @@ def scale_by_soap(
                     blocked_updates,
                     scanned_layers_,
                 )
-                return updates
+                return blocked_updates
             blocked_grad_projected = block(grad_projected)
             blocked_exp_avg_sq = block(state.exp_avg_sq)
             blocked_exp_avg_sq = otu.tree_update_moment_per_elem_norm(blocked_grad_projected, blocked_exp_avg_sq, b2, 2)
