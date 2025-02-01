@@ -668,6 +668,7 @@ def _unstack_and_unpad_matrices(stacked_array, original_shapes):
         unpadded.append(arr)
     return tuple(unpadded)
 
+from collections import defaultdict
 
 # unused fns (can be used for stacking partitions without padding):
 def _sort_and_group_matrices(matrix_shapes: List[Tuple[int, ...]]):

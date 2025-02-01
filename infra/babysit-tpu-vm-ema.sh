@@ -78,10 +78,10 @@ while true; do
       # run the command
       echo "Running command on VM $VM_NAME"
       # customize command
-      gcloud compute tpus tpu-vm ssh $VM_NAME --zone $ZONE --worker=all --command 'rm -r levanter/config'
+      gcloud compute tpus tpu-vm ssh $VM_NAME --zone $ZONE --worker=all --command 'rm -r levanter/src'
       gcloud compute tpus tpu-vm ssh $VM_NAME --zone $ZONE --worker=all --command 'rm -r levanter/src/levanter/optim'
       gcloud compute tpus tpu-vm scp --recurse config $VM_NAME:levanter/config --zone $ZONE --worker=all
-      gcloud compute tpus tpu-vm scp --recurse src/levanter/optim $VM_NAME:levanter/src/levanter/optim --zone $ZONE --worker=all
+      gcloud compute tpus tpu-vm scp --recurse src $VM_NAME:levanter/src --zone $ZONE --worker=all
       gcloud compute tpus tpu-vm scp src/levanter/models/llama.py  $VM_NAME:levanter/src/levanter/models/llama.py  --zone $ZONE --worker=all
       gcloud compute tpus tpu-vm scp src/levanter/callbacks.py  $VM_NAME:levanter/src/levanter/callbacks.py --zone $ZONE --worker=all
       gcloud compute tpus tpu-vm scp src/levanter/eval.py  $VM_NAME:levanter/src/levanter/eval.py --zone $ZONE --worker=all
