@@ -152,7 +152,9 @@ def scale_by_soap(
             params,
             scanned_layers_,
         )
-    
+        
+        
+        partitioned_shapes = shapes
         if partition_grads_into_blocks:
             partitioners = jax.tree.map(
                 lambda _, ps, dd: BlockPartitioner(ps, block_size, dd),
@@ -315,7 +317,7 @@ def scale_by_soap(
             def block(updates):
                 blocked_updates = jax.tree.map(
                     lambda g, p_cls, s: _map_fn(False, 0, int(s), p_cls.partition, g),
-                    dummy_updates_tree,
+                    updates,
                     partitioners,
                     scanned_layers_,
                 )
