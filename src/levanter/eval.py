@@ -193,7 +193,6 @@ def cb_tagged_lm_evaluate(
     )
 
     def eval_callback(step: StepInfo):
-        results = dict()
         with levanter.tracker.capture_time() as time_fn:
             result = evaluator.evaluate(step.eval_model)
 
@@ -204,43 +203,44 @@ def cb_tagged_lm_evaluate(
             _join_prefix(prefix, "total_time"): time_fn(),
         }
 
-            logger.info(f"{p} loss: {result.micro_avg_loss:.3f}")
-            has_tags = len(evaluator.dataset.tag_to_index) > 1  # 1 tag means there's no difference between micro and macro
-            if has_tags:
-                log_dict[_join_prefix(p, "macro_loss")] = result.macro_avg_loss
+        logger.info(f"{prefix} loss: {result.micro_avg_loss:.3f}")
+        has_tags = len(evaluator.dataset.tag_to_index) > 1  # 1 tag means there's no difference between micro and macro
+        if has_tags:
+            log_dict[_join_prefix(prefix, "macro_loss")] = result.macro_avg_loss
 
-                for tag, loss in result.tag_macro_losses.items():
-                    # don't log leaf tag macro losses because it doesn't mean anything different than micro loss
-                    if tag in evaluator.dataset.tag_to_index:
-                        continue
-                    if not tag:
-                        continue
-                    log_dict[_join_prefix(p, tag) + "/macro_loss"] = loss
-                    logger.info(f"{tag} macro loss: {loss:.3f}")
-
-            for tag, loss in result.tag_micro_losses.items():
+            for tag, loss in result.tag_macro_losses.items():
+                # don't log leaf tag macro losses because it doesn't mean anything different than micro loss
+                if tag in evaluator.dataset.tag_to_index:
+                    continue
                 if not tag:
                     continue
-                if tag in evaluator.dataset.tag_to_index:
-                    log_dict[_join_prefix(p, tag) + "/loss"] = loss
-                    logger.info(f"{tag} loss: {loss:.3f}")
-                else:
-                    log_dict[_join_prefix(p, tag) + "/micro_loss"] = loss
-                    logger.info(f"{tag} micro loss: {loss:.3f}")
+                log_dict[_join_prefix(prefix, tag) + "/macro_loss"] = loss
+                logger.info(f"{tag} macro loss: {loss:.3f}")
 
-            if tokenizer is not None:
-                log_dict[_join_prefix(p, "bpb")] = result.micro_bpb
-                if has_tags:
-                    log_dict[_join_prefix(p, "macro_bpb")] = result.macro_bpb
-                for tag, bpb in result.tag_micro_bpb.items():
-                    log_dict[_join_prefix(p, tag) + "/bpb"] = bpb
+        for tag, loss in result.tag_micro_losses.items():
+            if not tag:
+                continue
+            if tag in evaluator.dataset.tag_to_index:
+                log_dict[_join_prefix(prefix, tag) + "/loss"] = loss
+                logger.info(f"{tag} loss: {loss:.3f}")
+            else:
+                log_dict[_join_prefix(prefix, tag) + "/micro_loss"] = loss
+                logger.info(f"{tag} micro loss: {loss:.3f}")
 
-                if has_tags:
-                    for tag, bpb in result.tag_macro_bpb.items():
-                        log_dict[_join_prefix(p, tag) + "/macro_bpb"] = bpb
+        if tokenizer is not None:
+            log_dict[_join_prefix(prefix, "bpb")] = result.micro_bpb
+            if has_tags:
+                log_dict[_join_prefix(prefix, "macro_bpb")] = result.macro_bpb
+            for tag, bpb in result.tag_micro_bpb.items():
+                log_dict[_join_prefix(prefix, tag) + "/bpb"] = bpb
 
-            levanter.tracker.log(log_dict, step=step.step)
-        return original_result
+            if has_tags:
+                for tag, bpb in result.tag_macro_bpb.items():
+                    log_dict[_join_prefix(prefix, tag) + "/macro_bpb"] = bpb
+
+        levanter.tracker.log(log_dict, step=step.step)
+
+        return result
 
     return eval_callback
 

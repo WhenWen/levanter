@@ -35,12 +35,6 @@ def _ensure_int_is_array(x):
     else:
         return x
 
-def _ensure_float_is_array(x):
-    # who tf decided that bools are ints
-    if isinstance(x, float):
-        return jnp.array(x)
-    else:
-        return x
 
 class TrainerState(eqx.Module, Generic[M]):
     """
@@ -56,10 +50,10 @@ class TrainerState(eqx.Module, Generic[M]):
 
     step: IntScalar = eqx.field(converter=_ensure_int_is_array)
     model: M
-    ema_model: Optional[M]
     optimizer: GradientTransformation = eqx.field(static=True)
     opt_state: OptState
     training_key: PRNGKeyArray
+
     is_trainable: FilterTree = eqx.field(static=True)
     mp: jmp.Policy = eqx.field(static=True)
 
@@ -75,9 +69,6 @@ class TrainerState(eqx.Module, Generic[M]):
     @property
     def trainable_model(self) -> M:
         return trainables_only(self.model, self.is_trainable)
-    @property
-    def trainable_ema_model(self) -> M:
-        return trainables_only(self.ema_model, self.is_trainable)
 
     @property
     def saveable_state(self) -> FilterTree:
@@ -116,11 +107,6 @@ class TrainerState(eqx.Module, Generic[M]):
         else:
             mp = jmp.get_policy("f32")
 
-        if use_ema or use_schedule_free:
-            ema_model = jax.tree_util.tree_map(lambda x: jnp.array(x, copy = True), model)
-        else:
-            ema_model = None
-
         if fp8 is not None:
             model = fp8_linear_layers(model, fp8)
 
@@ -146,17 +132,13 @@ class TrainerState(eqx.Module, Generic[M]):
 
     def take_step(self: S, grads: PyTree, obj_fun: Optional[Callable[[M], Scalar]] = None) -> S:
         assert isinstance(self, TrainerState)  # make mypy happy
-        model, ema_model, opt_state = take_train_step(
+        model, opt_state = take_train_step(
             self.optimizer,
             self.model,
-            self.ema_model,
             self.opt_state,
             grads,
             obj_fun=obj_fun,
             is_trainable=self.is_trainable,
-            use_ema=self.use_ema,
-            ema_beta = self.ema_beta,
-            use_schedule_free=self.use_schedule_free
         )
 
         if self.model_averaging is not None:
@@ -167,7 +149,7 @@ class TrainerState(eqx.Module, Generic[M]):
         return dataclasses.replace(self, model=model, opt_state=opt_state, model_averaging=ma, step=self.step + 1)
 
 
-def init_optimizer_for_trainables(optimizer, model, is_trainable):
+def init_optimizer_for_trainables(optimizer, trainable_model):
     """
     Initializes the optimizer state for the trainable parameters of the model.
     """
@@ -230,22 +212,13 @@ def saveable_training_mask(trainer_state: S, is_trainable_param: FilterTree = Tr
     return saveable_state  # type: ignore
 
 
-def update_moment(updates, moments, decay):
-    """Compute the exponential moving average of the `order`-th moment."""
-    return jax.tree_util.tree_map(lambda g, t: (1 - decay) * g + decay * t, updates, moments)
-
-import optax
 def take_train_step(
     optimizer,
     model: M,
-    ema_model: Optional[M],
     opt_state,
     grads,
     *,
     obj_fun: Optional[Callable[[M], Scalar]] = None,
-    use_ema: bool = True,
-    ema_beta: float = 0.995,
-    use_schedule_free: bool = True,
     is_trainable: FilterTree = True,
 ) -> Tuple[M, OptState]:
     train_grads = trainables_only(grads, is_trainable)
@@ -253,14 +226,8 @@ def take_train_step(
     trainable_model = trainables_only(model, is_trainable)
     updates, opt_state = optimizer.update(train_grads, opt_state, params=trainable_model, obj_fn=obj_fun)
     model = apply_updates(model, updates, overwrites)
-    if use_ema:
-        ema_model = update_moment(model, ema_model, ema_beta)
-    elif use_schedule_free:
-        ema_model = optax.contrib.schedule_free_eval_params(opt_state.inner_state, model)
-    else:
-        ema_model = None
 
-    return model, ema_model, opt_state
+    return model, opt_state
 
 
 def make_floating_point_trainable_filter(is_trainable: FilterTree) -> FilterTree:
