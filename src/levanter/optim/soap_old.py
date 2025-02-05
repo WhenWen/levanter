@@ -37,8 +37,6 @@ class SoapConfig(OptimizerConfig):
     max_precond_dim: int = 10000
     mu_dtype: Optional[Any] = None
     precond_dtype: Optional[Any] = None
-    merge_small_dims: bool = True
-    target_merged_dim_size: int = 8192
     partition_grads_into_blocks: bool = True
     block_size: int = 256
     def build(self, num_train_steps):
@@ -58,8 +56,6 @@ class SoapConfig(OptimizerConfig):
             max_precond_dim=self.max_precond_dim,
             mu_dtype=self.mu_dtype,
             precond_dtype=self.precond_dtype,
-            merge_small_dims=self.merge_small_dims,
-            target_merged_dim_size=self.target_merged_dim_size,
             partition_grads_into_blocks=self.partition_grads_into_blocks,
             block_size=self.block_size,
             ))
@@ -81,7 +77,17 @@ from jax import vmap
 import haliax as hax
 from jax.sharding import PartitionSpec
 from jax.lax import with_sharding_constraint
+def _map_fn(lax_map, bs, n_maps, fn, *args):
+    """Maybe map a fn along multiple leading axes."""
+    if n_maps <= 0:
+        return fn(*args)
 
+    if lax_map:
+        mapped_fn = lambda xs: _map_fn(lax_map, bs, n_maps - 1, fn, *xs)
+        return jax.lax.map(mapped_fn, xs=args, batch_size=bs if bs > 1 else None)
+    else:
+        mapped_fn = lambda *xs: _map_fn(lax_map, bs, n_maps - 1, fn, *xs)
+        return vmap(mapped_fn)(*args)
 def scale_by_soap(
     b1: float = 0.95,
     b2: float = 0.95,
@@ -92,10 +98,8 @@ def scale_by_soap(
     precision: jax.lax.PrecisionLike = jax.lax.Precision.HIGHEST,
     mu_dtype: Optional[Any] = None,
     precond_dtype: Optional[Any] = None,
-    merge_small_dims: bool = True,
-    target_merged_dim_size: int = 8192,
-    partition_grads_into_blocks: bool = True,
-    block_size: int = 256
+    partition_grads_into_blocks: Optional[Any] = True,
+    block_size: Optional[Any] = 256
 ) -> GradientTransformation:
     """
     Implements SOAP algorithm (https://arxiv.org/abs/2409.11321). Based on the original implementation at https://github.com/nikhilvyas/SOAP.
@@ -133,12 +137,58 @@ def scale_by_soap(
             ),
             params,
             is_leaf=lambda x: isinstance(x, hax.nn.Stacked),
-        )        
+        )                
+        
+        shapes = jax.tree.map(
+            lambda p, s: p.shape[int(s) :], params, scanned_layers_
+        )
         exp_avg = otu.tree_zeros_like(params, dtype=mu_dtype)
         exp_avg_sq = otu.tree_zeros_like(params, dtype=mu_dtype)
+        null_dims = jax.tree.map(
+            lambda p, s: _get_preconditioner_types(
+                p.shape[int(s) :],
+                max_precond_dim
+            ),
+            params,
+            scanned_layers_,
+        )
+        
+        
+        partitioned_shapes = shapes
+        if partition_grads_into_blocks:
+            partitioners = jax.tree.map(
+                lambda _, ps, dd: BlockPartitioner(ps, block_size, dd),
+                params,
+                shapes,
+                null_dims,
+            )
+            # we can grab resulting shapes from partitioners
+            partitioned_shapes = jax.tree.map(
+                lambda _, p_cls: p_cls._padded_stacked_shape, params, partitioners
+            )
+            blocked_params = jax.tree.map(
+                lambda g, p_cls, s: _map_fn(False, 0, int(s), p_cls.partition, g),
+                params,
+                partitioners,
+                scanned_layers_,
+            )
+            blocked_params = jax.tree.map(
+                lambda _, g, s: _map_fn(
+                    False,
+                    0,
+                    int(s),
+                    lambda x, bs=block_size: _pad_and_stack_matrices(x, bs),
+                    g,
+                ),
+                params,
+                blocked_params,
+                scanned_layers_,
+            )
+        else:
+            exp_avg_sq = otu.tree_zeros_like(params, dtype=mu_dtype)
         GG = [
             init_conditioner(
-                t[0] if s else t,
+                t.shape[int(s):],
                 max_precond_dim,
                 precond_dtype
             ) 
@@ -159,7 +209,7 @@ def scale_by_soap(
 
         Q = [
             init_conditioner(
-                t[0] if s else t,
+                t.shape[int(s):],
                 max_precond_dim,
                 precond_dtype
             ) 
@@ -206,7 +256,7 @@ def scale_by_soap(
         new_Q = [map_fn(s, 
                     partial(get_orthogonal_matrix, eps = eps),
                    gg) 
-                   for s, gg in zip(jax.tree.leaves(scanned_layers_), state.GG)]
+                   for s, gg in zip(jax.tree.leaves(scanned_layers_), new_GG)]
 
         new_GG = otu.tree_cast(new_GG, precond_dtype)
         new_Q = otu.tree_cast(new_Q, precond_dtype)
@@ -236,6 +286,166 @@ def scale_by_soap(
 
         # Update moments
         exp_avg = otu.tree_update_moment(updates, state.exp_avg, b1, 1)
+        
+        
+        
+        original_shapes = jax.tree.map(
+            lambda p, s: p.shape[int(s) :], updates, scanned_layers_
+        )        
+        if partition_grads_into_blocks:
+            null_dims = jax.tree.map(
+                lambda p, s: _get_preconditioner_types(
+                    p.shape[int(s) :],
+                    max_precond_dim
+                ),
+                updates,
+                scanned_layers_,
+            )
+            partitioners = jax.tree.map(
+                lambda _, ps, dd: BlockPartitioner(ps, block_size, dd),
+                updates,
+                original_shapes,
+                null_dims,
+            ) 
+            dummy_updates_tree = jax.tree.map(lambda _: jnp.zeros([]), updates)
+            
+            
+            # blocking 
+            blocked_grad_projected = jax.tree.map(
+                lambda g, p_cls, s: _map_fn(False, 0, int(s), p_cls.partition, g),
+                grad_projected,
+                partitioners,
+                scanned_layers_,
+            )
+            blocked_exp_avg = jax.tree.map(
+                lambda g, p_cls, s: _map_fn(False, 0, int(s), p_cls.partition, g),
+                exp_avg,
+                partitioners,
+                scanned_layers_,
+            )
+            blocked_exp_avg_sq = jax.tree.map(
+                lambda g, p_cls, s: _map_fn(False, 0, int(s), p_cls.partition, g),
+                state.exp_avg_sq,
+                partitioners,
+                scanned_layers_,
+            )
+            # get shapes
+            partitioned_shapes = jax.tree.map(
+            lambda _, g, s: jax.tree.map(lambda x: x.shape[int(s) :], g),
+            dummy_updates_tree,
+            blocked_grad_projected,
+            scanned_layers_,)
+            
+            
+            # padding
+            blocked_grad_projected = jax.tree.map(
+                lambda _, g, s: _map_fn(
+                    False,
+                    0,
+                    int(s),
+                    lambda x, bs=block_size: _pad_and_stack_matrices(x, bs),
+                    g,
+                ),
+                dummy_updates_tree,
+                blocked_grad_projected,
+                scanned_layers_,
+            )
+            blocked_exp_avg = jax.tree.map(
+                lambda _, g, s: _map_fn(
+                    False,
+                    0,
+                    int(s),
+                    lambda x, bs=block_size: _pad_and_stack_matrices(x, bs),
+                    g,
+                ),
+                dummy_updates_tree,
+                blocked_exp_avg,
+                scanned_layers_,
+            )
+            blocked_exp_avg_sq = jax.tree.map(
+                lambda _, g, s: _map_fn(
+                    False,
+                    0,
+                    int(s),
+                    lambda x, bs=block_size: _pad_and_stack_matrices(x, bs),
+                    g,
+                ),
+                dummy_updates_tree,
+                blocked_exp_avg_sq,
+                scanned_layers_,
+            )
+            
+        
+        
+        # revert blocking of everything    
+        if partition_grads_into_blocks:
+            grad_projected = jax.tree.map(
+                lambda g, s, ps: _map_fn(
+                    False,
+                    0,
+                    int(s),
+                    lambda p, shapes=ps: _unstack_and_unpad_matrices(p, shapes),
+                    g,
+                ),
+                blocked_grad_projected,
+                scanned_layers_,
+                partitioned_shapes,
+            )
+            grad_projected = jax.tree.map(
+                lambda _, g, s, p_cls: _map_fn(
+                    False, 0, int(s), p_cls.merge_partitions, g
+                ),
+                dummy_updates_tree,
+                grad_projected,
+                scanned_layers_,
+                partitioners,
+            )
+            exp_avg_sq = jax.tree.map(
+                lambda g, s, ps: _map_fn(
+                    False,
+                    0,
+                    int(s),
+                    lambda p, shapes=ps: _unstack_and_unpad_matrices(p, shapes),
+                    g,
+                ),
+                blocked_exp_avg_sq,
+                scanned_layers_,
+                partitioned_shapes,
+            )
+            exp_avg_sq = jax.tree.map(
+                lambda _, g, s, p_cls: _map_fn(
+                    False, 0, int(s), p_cls.merge_partitions, g
+                ),
+                dummy_updates_tree,
+                exp_avg_sq,
+                scanned_layers_,
+                partitioners,
+            )
+            exp_avg = jax.tree.map(
+                lambda g, s, ps: _map_fn(
+                    False,
+                    0,
+                    int(s),
+                    lambda p, shapes=ps: _unstack_and_unpad_matrices(p, shapes),
+                    g,
+                ),
+                blocked_exp_avg,
+                scanned_layers_,
+                partitioned_shapes,
+            )
+            exp_avg = jax.tree.map(
+                lambda _, g, s, p_cls: _map_fn(
+                    False, 0, int(s), p_cls.merge_partitions, g
+                ),
+                dummy_updates_tree,
+                exp_avg,
+                scanned_layers_,
+                partitioners,
+            )
+        
+        
+        
+        
         exp_avg_sq = otu.tree_update_moment_per_elem_norm(grad_projected, state.exp_avg_sq, b2, 2)
 
         exp_avg_projected = [
@@ -456,21 +666,22 @@ def _get_preconditioner_types(
     shape: Tuple[int, ...], max_precond_dim: int
 ) -> List[bool]:
     if len(shape) == 0:
-        return True
+        return False
     
     if len(shape) == 1:
-        return [True]
+        return [False]
     
-    return [s <= max_precond_dim for s in shape]
+    return [s >= max_precond_dim for s in shape]
 
 
 
-def init_conditioner(p: Array, max_precond_dim: int, dtype: Optional[Any]) -> List[Union[Array, None]]:
-    if p.ndim == 1:
-        return [jnp.zeros((p.shape[0], p.shape[0]), dtype = dtype)]
+def init_conditioner(p_shape: Any, max_precond_dim: int, dtype: Optional[Any]) -> List[Union[Array, None]]:
+    if len(p_shape) == 1:
+        return [jnp.zeros((p_shape[0], p_shape[0]), dtype = dtype)]
 
-    return [jnp.zeros((s, s), dtype = dtype) if s <= max_precond_dim else None for s in p.shape]
+    return [jnp.zeros((s, s), dtype = dtype) if s <= max_precond_dim else None for s in p_shape]
 
+import numpy as np
 
 class BlockPartitioner:
     """Partitions a tensor into smaller tensors.
@@ -482,14 +693,14 @@ class BlockPartitioner:
     https://arxiv.org/abs/2002.09018
     """
 
-    def __init__(self, param_shape, block_size, dim_diag):
+    def __init__(self, param_shape, block_size, null_dims):
         self._shape = param_shape
         self._splits = []
         split_sizes = []
         # We split params into smaller blocks. Here we store the metadata to make
         # that split.
         for i, d in enumerate(param_shape):
-            if 0 < block_size < d and not dim_diag[i]:
+            if 0 < block_size < d and not null_dims[i]:
                 # d-1, otherwise split appends a 0-size array.
                 nsplit = (d - 1) // block_size
                 indices = (np.arange(nsplit, dtype=np.int32) + 1) * block_size
@@ -550,74 +761,6 @@ def _partitions(lst):
                 yield [lst[: i + 1]] + part
 
 
-def _merge_small_dims(
-    shape_to_merge, max_dim, dim_diag, sharding_to_merge=None
-) -> Tuple[List[int], List[bool], Optional[Tuple]]:
-    if not shape_to_merge:  # handles scalar shape ()
-        return [], [True], PartitionSpec() if sharding_to_merge is not None else None
-    if np.all(np.array(shape_to_merge) == 1):  # handles shape (1,)
-        return (
-            [1],
-            [True],
-            PartitionSpec(None) if sharding_to_merge is not None else None,
-        )
-
-    def dim2loss(d, dim0=max_dim):
-        """A heuristic map from dim to loss with the least loss occurs at dim0."""
-        loss = 0
-        if d < dim0:
-            loss += np.log2(dim0 / d)
-            too_small = dim0 / 8
-            if d < too_small:
-                loss += 100 * np.log2(too_small / d)
-        else:
-            loss += 10 * np.log2(d / dim0)
-            too_large = 8 * dim0
-            if d > too_large:
-                loss += 1000 * np.log2(d / too_large)
-        return loss
-
-    best_loss = float("inf")
-    best_partition = None
-
-    for p in _partitions(list(range(len(shape_to_merge)))):
-        loss = 0
-        merged = []
-        for group in p:
-            if not group:
-                continue
-            d = np.prod([shape_to_merge[i] for i in group])
-            loss += dim2loss(d)
-            merged.append(group)
-
-        if loss < best_loss:
-            best_loss = loss
-            best_partition = merged
-
-    merged_shape = []
-    merged_diag = []
-    merged_sharding = []
-
-    for group in best_partition:
-        merged_shape.append(np.prod([shape_to_merge[i] for i in group]))
-        merged_diag.append(all(dim_diag[i] for i in group))
-        if sharding_to_merge:
-            group_shardings = [sharding_to_merge[i] for i in group]
-            valid_shardings = [s for s in group_shardings if s is not None]
-
-            if len(valid_shardings) > 1:
-                merged_sharding.append(tuple(valid_shardings))
-            elif len(valid_shardings) == 1:
-                merged_sharding.append(valid_shardings[0])
-            else:
-                merged_sharding.append(None)
-
-    return (
-        merged_shape,
-        merged_diag,
-        PartitionSpec(*merged_sharding) if sharding_to_merge else None,
-    )
-
 
 def _pad_and_stack_matrices(array_list, block_size):
     # Handle scalar arrays by adding a dummy dimension
@@ -656,6 +799,7 @@ def _unstack_and_unpad_matrices(stacked_array, original_shapes):
         unpadded.append(arr)
     return tuple(unpadded)
 
+from collections import defaultdict
 
 # unused fns (can be used for stacking partitions without padding):
 def _sort_and_group_matrices(matrix_shapes: List[Tuple[int, ...]]):

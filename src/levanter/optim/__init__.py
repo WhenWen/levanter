@@ -64,3 +64,7 @@ from .rmsprop import (
 from .soap import (
     SoapConfig
 )
+
+from .shampoo import (
+    ShampooConfig
+)
