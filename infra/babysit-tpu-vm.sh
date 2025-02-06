@@ -82,6 +82,7 @@ while true; do
       gcloud compute tpus tpu-vm ssh $VM_NAME --zone $ZONE --worker=all --command 'rm -r levanter/src/levanter/optim'
       gcloud compute tpus tpu-vm scp --recurse config $VM_NAME:levanter/config --zone $ZONE --worker=all
       gcloud compute tpus tpu-vm scp --recurse src/levanter/optim $VM_NAME:levanter/src/levanter/optim --zone $ZONE --worker=all
+      gcloud compute tpus tpu-vm scp src/levanter/models/llama.py  $VM_NAME:levanter/src/levanter/models/llama.py  --zone $ZONE --worker=all
       gcloud compute tpus tpu-vm ssh --zone=$ZONE $VM_NAME --command="$CMD_ARGS_STR" --worker=all
       EXIT_CODE=$?
       if [ $EXIT_CODE -eq 0 ]; then
