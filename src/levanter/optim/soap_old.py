@@ -35,6 +35,8 @@ class SoapConfig(OptimizerConfig):
     precondition_frequency: int = 10
     scanned_layers: Optional[optax.Params] = None
     max_precond_dim: int = 10000
+    merge_small_dims: bool = True
+    target_merged_dim_size: int = 2048
     mu_dtype: Optional[Any] = None
     precond_dtype: Optional[Any] = None
     partition_grads_into_blocks: bool = True
@@ -54,6 +56,8 @@ class SoapConfig(OptimizerConfig):
             eps=self.eps,
             precondition_frequency=self.precondition_frequency,
             max_precond_dim=self.max_precond_dim,
+            merge_small_dims=self.merge_small_dims,
+            target_merged_dim_size=self.target_merged_dim_size,
             mu_dtype=self.mu_dtype,
             precond_dtype=self.precond_dtype,
             partition_grads_into_blocks=self.partition_grads_into_blocks,
@@ -101,7 +105,9 @@ def scale_by_soap(
     partition_grads_into_blocks: Optional[Any] = True,
     block_size: Optional[Any] = 256,
     lax_map_scanned_layers: Optional[bool] = True,
-    lax_map_batch_size: Optional[int] = 4
+    lax_map_batch_size: Optional[int] = 4,
+    merge_small_dims: bool = False,
+    target_merged_dim_size: int = 2048,
 ) -> GradientTransformation:
     """
     Implements SOAP algorithm (https://arxiv.org/abs/2409.11321). Based on the original implementation at https://github.com/nikhilvyas/SOAP.
@@ -159,10 +165,44 @@ def scale_by_soap(
             params,
             scanned_layers_,
         )
+        null_dims_leaf = [
+            _get_preconditioner_types(
+                p.shape[int(s) :],
+                max_precond_dim
+            )
+            for p, s in zip(jax.tree.leaves(params), jax.tree.leaves(scanned_layers_))
+        ]
+        nones = jax.tree.map(lambda _: None, params)
+        merged_shapes = shapes
+        merged_shapes_leaf = shapes_leaf
         
+        print(shapes_leaf)
         
-        partitioned_shapes = shapes
-        partitioned_shapes_leaf = shapes_leaf
+        if merge_small_dims:
+            output = jax.tree.map(
+                lambda p, s, dd: _merge_small_dims(
+                    p.shape[int(s) :], target_merged_dim_size, dd
+                ),
+                params,
+                scanned_layers_,
+                null_dims)
+            merged_shapes, null_dims = [
+                jax.tree.map(lambda _, x: x[i], params, output) for i in range(2)
+            ]
+            merged_shapes_leaf = [
+                _merge_small_dims(
+                    p.shape[int(s) :], target_merged_dim_size, dd
+                )[0] for p, s, dd in zip(
+                    jax.tree.leaves(params),
+                    jax.tree.leaves(scanned_layers_),
+                    null_dims_leaf
+                )
+            ]
+            
+        print(merged_shapes_leaf)
+        
+        partitioned_shapes = merged_shapes
+        partitioned_shapes_leaf = merged_shapes_leaf
         if partition_grads_into_blocks:
             partitioners = jax.tree.map(
                 lambda _, ps, dd: BlockPartitioner(ps, block_size, dd),
@@ -213,6 +253,8 @@ def scale_by_soap(
         scanned_sizes = jax.tree.map(
             lambda p, s: p.shape[0] if s else 0, params, scanned_layers_
         )
+        
+        print(shapes_leaf)
         print(partitioned_shapes_leaf)
         
         GG = [
@@ -290,6 +332,46 @@ def scale_by_soap(
         )        
         n_dims_to_map = jax.tree.map(lambda s: int(s), scanned_layers_)
         dummy_updates_tree = jax.tree.map(lambda _: jnp.zeros([]), updates)
+        null_dims = jax.tree.map(
+            lambda p, s: _get_preconditioner_types(
+                p.shape[int(s) :],
+                max_precond_dim
+            ),
+            updates,
+            scanned_layers_,
+        )
+        null_dims_leaf = [
+            _get_preconditioner_types(
+                p.shape[int(s) :],
+                max_precond_dim
+            )
+            for p, s in zip(jax.tree.leaves(updates), jax.tree.leaves(scanned_layers_))
+        ]
+
+        if merge_small_dims:
+            original_shapes = jax.tree.map(
+                lambda g, s: g.shape[int(s) :], updates, scanned_layers_
+            )
+            output = jax.tree.map(
+                lambda g, dd, s: _merge_small_dims(
+                    g.shape[int(s) :], target_merged_dim_size, dd
+                ),
+                updates,
+                null_dims,
+                scanned_layers_)
+            merged_shapes, null_dims = [
+                jax.tree.map(lambda _, x: x[i], updates, output)
+                for i in range(2)
+            ]
+            # reshape
+            updates = jax.tree.map(
+                lambda g, s, ns: _map_fn(
+                    False, 0, int(s), lambda x, shape=ns: jnp.reshape(x, shape), g
+                ),
+                updates,
+                scanned_layers_,
+                merged_shapes,
+            )
         if partition_grads_into_blocks:
             null_dims = jax.tree.map(
                 lambda p, s: _get_preconditioner_types(
@@ -345,7 +427,12 @@ def scale_by_soap(
         #     n_dims_to_map,
         #     blocked_updates,
         #     state.GG
-        # )        
+        # )
+        
+        print(jax.tree.leaves(n_dims_to_map))
+        print([s.shape for s in jax.tree.leaves(blocked_updates)])
+        print([[g.shape if g is not None else None for g in gg] for gg in state.GG])
+                
         
         new_GG = [
             _map_fn(False,
@@ -374,6 +461,16 @@ def scale_by_soap(
         new_GG = otu.tree_cast(new_GG, precond_dtype)
         # new_Q = otu.tree_cast(new_Q, precond_dtype)
         
+        
+        if merge_small_dims:
+            updates = jax.tree.map(
+                lambda g, s, os: _map_fn(
+                    False, 0, int(s), lambda p, shape=os: jnp.reshape(p, shape), g
+                ),
+                updates,
+                scanned_layers_,
+                original_shapes,
+            )
 
         # Replace updates with zeros
         new_updates = otu.tree_zeros_like(updates)
@@ -1001,3 +1098,59 @@ def _unstack_matrices(stacked_arrays, revert_indices):
     if in_tuple:
         return tuple(array_list)
     return array_list
+
+
+def _merge_small_dims(
+    shape_to_merge, max_dim, null_dims
+) -> Tuple[List[int], List[bool], Optional[Tuple]]:
+    if not shape_to_merge:  # handles scalar shape ()
+        return [], [True]
+    if np.all(np.array(shape_to_merge) == 1):  # handles shape (1,)
+        return (
+            [1],
+            [True],
+        )
+
+    def dim2loss(d, dim0=max_dim):
+        """A heuristic map from dim to loss with the least loss occurs at dim0."""
+        loss = 0
+        if d < dim0:
+            loss += np.log2(dim0 / d)
+            too_small = dim0 / 8
+            if d < too_small:
+                loss += 100 * np.log2(too_small / d)
+        else:
+            loss += 10 * np.log2(d / dim0)
+            too_large = 8 * dim0
+            if d > too_large:
+                loss += 1000 * np.log2(d / too_large)
+        return loss
+
+    best_loss = float("inf")
+    best_partition = None
+
+    for p in _partitions(list(range(len(shape_to_merge)))):
+        loss = 0
+        merged = []
+        for group in p:
+            if not group:
+                continue
+            d = np.prod([shape_to_merge[i] for i in group])
+            loss += dim2loss(d)
+            merged.append(group)
+
+        if loss < best_loss:
+            best_loss = loss
+            best_partition = merged
+
+    merged_shape = []
+    merged_diag = []
+
+    for group in best_partition:
+        merged_shape.append(np.prod([shape_to_merge[i] for i in group]))
+        merged_diag.append(all(null_dims[i] for i in group))
+
+    return (
+        merged_shape,
+        merged_diag,
+    )

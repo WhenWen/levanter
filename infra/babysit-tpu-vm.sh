@@ -79,7 +79,8 @@ while true; do
       echo "Running command on VM $VM_NAME"
       echo "gcloud compute tpus tpu-vm ssh --zone=$ZONE $VM_NAME --command='$CMD_ARGS_STR' --worker=all"
       gcloud compute tpus tpu-vm ssh  --zone $ZONE  $VM_NAME --command="source venv*/bin/activate && pip3 install flax" --worker=all
-      gcloud compute tpus tpu-vm scp src/levanter/optim/soap.py  $VM_NAME:levanter/src/levanter/optim --zone $ZONE --worker=all
+      gcloud compute tpus tpu-vm ssh  --zone $ZONE  $VM_NAME --command="source venv*/bin/activate && pip3 install -U draccus" --worker=all
+      gcloud compute tpus tpu-vm scp src/levanter/optim/soap_old.py  $VM_NAME:levanter/src/levanter/optim/soap.py --zone $ZONE --worker=all
       gcloud compute tpus tpu-vm scp src/levanter/optim/shampoo.py  $VM_NAME:levanter/src/levanter/optim --zone $ZONE --worker=all
       gcloud compute tpus tpu-vm ssh --zone=$ZONE $VM_NAME --command="$CMD_ARGS_STR" --worker=all
       EXIT_CODE=$?
