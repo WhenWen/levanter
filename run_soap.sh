@@ -6,6 +6,6 @@ levanter/src/levanter/main/train_lm.py \
 --config_path levanter/config/llama2_100M_constant_lr4e-3.yaml  \
 --trainer.checkpointer.base_path  gs://marin-us-central2/scratch/kaiyue/checkpoints/soap/lr8e-3_step50000  \
 --optimizer.learning_rate 8e-3 \
---optimizer.type soap \
+--optimizer.type adam \
 --trainer.wandb.name soap_with_block \
 --optimizer.partition_grads_into_blocks True
