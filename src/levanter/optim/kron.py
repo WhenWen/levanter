@@ -74,7 +74,7 @@ class KronConfig(OptimizerConfig):
     precond_dtype: Optional[Any] = None
     precond_update_precision: Optional[str] = "tensorfloat32"
     precond_grads_precision: Optional[str] = None
-    scanned_layers: Optional[optax.Params] = None
+    # scanned_layers: Optional[optax.Params] = None
     lax_map_scanned_layers: bool = False
     lax_map_batch_size: int = 8
     merge_small_dims: bool = True

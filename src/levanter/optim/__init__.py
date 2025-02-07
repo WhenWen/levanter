@@ -52,9 +52,9 @@ from .sophiapro import (
     SophiaProHConfig,
 )
 
-from .kron import (
-    KronConfig,
-)
+# from .kron import (
+#     KronConfig,
+# )
 
 from .rmsprop import (
     RMSPropMomentumConfig,
@@ -65,6 +65,6 @@ from .soap import (
     SoapConfig
 )
 
-from .shampoo import (
-    ShampooConfig
-)
+# from .shampoo import (
+#     ShampooConfig
+# )
