@@ -52,9 +52,9 @@ from .sophiapro import (
     SophiaProHConfig,
 )
 
-# from .kron import (
-#     KronConfig,
-# )
+from .kron import (
+    KronConfig,
+)
 
 from .rmsprop import (
     RMSPropMomentumConfig,
