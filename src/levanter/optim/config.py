@@ -316,7 +316,6 @@ class AdamConfig(OptimizerConfig):
     beta2: float = 0.95
     epsilon: float = 1e-8
     max_grad_norm: Optional[float] = 1.0
-    nesterov: bool = False
 
     def build(self, num_train_steps):
         """Creates the optimizer"""
@@ -327,7 +326,7 @@ class AdamConfig(OptimizerConfig):
             if self.max_grad_norm:
                 components.append(optax.clip_by_global_norm(self.max_grad_norm))
 
-            components.append(optax.scale_by_adam(self.beta1, self.beta2, self.epsilon, nesterov = self.nesterov))
+            components.append(optax.scale_by_adam(self.beta1, self.beta2, self.epsilon))
 
             if self.weight_decay > 0:
                 components.append(optax.add_decayed_weights(self.weight_decay, self.build_weight_decay_mask()))

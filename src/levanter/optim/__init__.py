@@ -11,6 +11,18 @@ from .muon import (
     ScaleByMuonState
 )
 
+from .muon_block import(
+    MuonBConfig,
+    MuonBState
+)
+
+
+from .muadam4 import (
+    MuAdam4Config,
+    ScaleByMuAdam4State
+)
+
+
 from .muonc import (
     MuonCConfig,
     ScaleByMuonCState
@@ -52,9 +64,9 @@ from .sophiapro import (
     SophiaProHConfig,
 )
 
-from .kron import (
-    KronConfig,
-)
+# from .kron import (
+#     KronConfig,
+# )
 
 from .rmsprop import (
     RMSPropMomentumConfig,
