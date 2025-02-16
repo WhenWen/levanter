@@ -31,4 +31,4 @@ optimizer:
   lr_schedule: constant
   min_lr_ratio: 0.0 
   max_grad_norm: 0.0 
-  type: muon 
+  type: muadam4 
