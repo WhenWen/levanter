@@ -129,10 +129,10 @@ class BaseSophiaConfig(HessianOptConfig):
     weight_decay: float = 0.1
     beta1: float = 0.96
     beta2: float = 0.99
-
     epsilon: float = 1e-12
     clip_threshold: Optional[float] = 1.0
     rng_seed: int = 0
+    max_grad_norm: Optional[float] = 1.0
 
     @abc.abstractmethod
     def compute_hessian(
@@ -149,6 +149,8 @@ class BaseSophiaConfig(HessianOptConfig):
         def _optimizer(learning_rate, gamma) -> optax.GradientTransformation:
             components = []
             key = jax.random.PRNGKey(self.rng_seed)
+            if self.max_grad_norm:
+                components.append(optax.clip_by_global_norm(self.max_grad_norm))
 
             components.append(
                 _sophia_gradient_transform(

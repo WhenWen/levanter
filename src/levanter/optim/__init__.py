@@ -1,4 +1,4 @@
-from .config import AdamConfig, OptimizerConfig
+from .config import AdamConfig, OptimizerConfig, LionConfig
 from .sadam import SAdamConfig
 from .sophia import (  # SophiaGConfig,; SophiaGObjective,
     ScaleBySophiaState,
@@ -62,6 +62,10 @@ from .la import (
 from .sophiapro import (
     ScaleBySophiaProState,
     SophiaProHConfig,
+)
+
+from .cautious import (
+    CautiousConfig
 )
 
 # from .kron import (

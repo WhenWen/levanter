@@ -28,9 +28,6 @@ class MarsConfig(OptimizerConfig):
     gamma: float = 0.025
     epsilon: float = 1e-8
     max_grad_norm: Optional[float] = 1.0
-    haps: Optional[list[int]] = None
-    schedule_list: Optional[list[str]] = None
-
     def build(self, num_train_steps):
         """Creates the optimizer"""
         # indirection makes it work with optax.inject_hyperparams so we can log the learning rate
