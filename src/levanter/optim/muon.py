@@ -23,8 +23,8 @@ class MuonConfig(OptimizerConfig):
     Muon optimizer configuration: Momentum Orthogonalized by Newton-Schulz.
     """
 
-    lr: float = 0.02
-    muon_to_adam_lr: float = 0.18  # Scaling factor between AdamW and Muon learning rates
+    lr: float = 0.04
+    muon_to_adam_lr: float = 0.25  # Scaling factor between AdamW and Muon learning rates
     momentum: float = 0.95
     nesterov: bool = True
     backend_steps: int = 10  # Number of steps for Newton-Schulz orthogonalization
@@ -32,13 +32,8 @@ class MuonConfig(OptimizerConfig):
     beta1: float = 0.9
     beta2: float = 0.95
     epsilon: float = 1e-8
+    muon_epsilon: float = 1e-8
     max_grad_norm: float = 1.0
-    # adam_modules: Optional[list[str] | str] = None
-    # """A regex or a list of strings to identify where to mask weight.
-    # For nano-GPT, this field can be set as `r".*attn.*weight|.*mlp.*weight|.*token_embeddings|.*position_embeddings"`"""
-    # default_adam_mask: Optional[bool] = None
-    # """Whether to apply a default reasonable weight decay to modules not explicitly masked. None means it will if
-    # no weight_decay_modules are set. False means it will not. True means it will regardless of weight_decay_modules."""
 
     def build(self, num_train_steps):
         """
@@ -51,10 +46,7 @@ class MuonConfig(OptimizerConfig):
 
             def muon_transform():
                 components = []
-                # Muon seems incompatible with gradient clipping, need to investigate
-                # if self.max_grad_norm:
-                #     components.append(optax.clip_by_global_norm(self.max_grad_norm))
-                components.append(scale_with_muon(self.momentum, self.nesterov, self.backend_steps))
+                components.append(scale_with_muon(self.momentum, self.nesterov, self.backend_steps, self.muon_epsilon))
                 if self.weight_decay > 0:
                     components.append(optax.add_decayed_weights(self.weight_decay, self.build_weight_decay_mask()))
                 components.append(optax.scale(-learning_rate))
@@ -107,7 +99,7 @@ class ScaleByMuonState(NamedTuple):
     momentum_buffer: optax.Updates
 
 
-def scale_with_muon(momentum=0.95, nesterov=True, steps=5):
+def scale_with_muon(momentum=0.95, nesterov=True, steps=5, muon_eps = 1e-8):
     def init_fn(params):
         momentum_buffer = otu.tree_zeros_like(params)  # First moment
         return ScaleByMuonState(momentum_buffer=momentum_buffer)
@@ -133,7 +125,7 @@ def scale_with_muon(momentum=0.95, nesterov=True, steps=5):
         def transform_linear_layer(layer: haliax.nn.Linear):
             assert layer.weight.ndim == 2
 
-            updated_weight_array = zeropower_via_newtonschulz5(layer.weight.array, steps=steps)
+            updated_weight_array = zeropower_via_newtonschulz5(layer.weight.array, steps=steps, eps = muon_eps)
 
             scale = jnp.sqrt(jnp.maximum(1, updated_weight_array.shape[0] / updated_weight_array.shape[1]))
             updated_weight_array *= scale
@@ -155,7 +147,7 @@ def zeropower_via_newtonschulz5(X, steps=10, eps=1e-7):
     """
     chex.assert_rank(X, 2)
     a, b, c = (3.4445, -4.7750, 2.0315)
-    X /= jnp.linalg.norm(X) + eps  # Ensure top singular value <= 1
+    X /= (jnp.linalg.norm(X) + eps)  # Ensure top singular value <= 1
     transpose = False
     if X.shape[0] > X.shape[1]:
         X = X.T
