@@ -86,9 +86,9 @@ while true; do
       gcloud compute tpus tpu-vm ssh  --zone $ZONE  $VM_NAME --command="source venv*/bin/activate && pip3 install flax" --worker=all
       # gcloud compute tpus tpu-vm ssh  --zone $ZONE  $VM_NAME --command="source venv*/bin/activate && pip3 install -U draccus" --worker=all
       gcloud compute tpus tpu-vm scp src/levanter/optim/soap.py  $VM_NAME:levanter/src/levanter/optim/soap.py --zone $ZONE --worker=all
-      gcloud compute tpus tpu-vm scp src/levanter/optim/muadam4.py  $VM_NAME:levanter/src/levanter/optim/muadam4.py --zone $ZONE --worker=all
-      gcloud compute tpus tpu-vm scp src/levanter/optim/muon_block.py  $VM_NAME:levanter/src/levanter/optim/muon_block.py --zone $ZONE --worker=all
-      gcloud compute tpus tpu-vm scp src/levanter/optim/__init__.py  $VM_NAME:levanter/src/levanter/optim/__init__.py --zone $ZONE --worker=all
+      # gcloud compute tpus tpu-vm scp src/levanter/optim/muadam4.py  $VM_NAME:levanter/src/levanter/optim/muadam4.py --zone $ZONE --worker=all
+      # gcloud compute tpus tpu-vm scp src/levanter/optim/muon_block.py  $VM_NAME:levanter/src/levanter/optim/muon_block.py --zone $ZONE --worker=all
+      # gcloud compute tpus tpu-vm scp src/levanter/optim/__init__.py  $VM_NAME:levanter/src/levanter/optim/__init__.py --zone $ZONE --worker=all
       # gcloud compute tpus tpu-vm scp src/levanter/optim/shampoo.py  $VM_NAME:levanter/src/levanter/optim --zone $ZONE --worker=all
       gcloud compute tpus tpu-vm ssh --zone=$ZONE $VM_NAME --command="$CMD_ARGS_STR" --worker=all
       EXIT_CODE=$?

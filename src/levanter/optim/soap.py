@@ -396,26 +396,30 @@ def scale_by_soap(
         print([[g.shape if g is not None else None for g in gg] for gg in state.GG])
                 
         
-        new_GG = [
-            _map_fn(False,
+        new_GG = jax.tree.map(
+            lambda nm, grad, gg:  _map_fn(False,
                     0,
                     nm, 
                    partial(update_preconditioner, beta = shampoo_beta),
                    grad,
                    gg
-            )
-            for nm, grad, gg in zip(jax.tree.leaves(n_dims_to_map), jax.tree.leaves(blocked_updates), state.GG)
-        ]
-        
-        new_Q = [
-            _map_fn(False,
+            ),
+            jax.tree.leaves(n_dims_to_map),
+            jax.tree.leaves(blocked_updates),
+            state.GG
+        )
+
+        new_Q = jax.tree.map(
+            lambda nm, gg: _map_fn(False,
                     0,
                     nm,
                     partial(get_orthogonal_matrix, eps = eps),
                    gg
-            ) for nm, gg in zip(jax.tree.leaves(n_dims_to_map), new_GG)
-        ]
-
+            ),
+            jax.tree.leaves(n_dims_to_map),
+            new_GG
+        )
+        
         new_GG = otu.tree_cast(new_GG, precond_dtype)
         new_Q = otu.tree_cast(new_Q, precond_dtype)
         
@@ -657,20 +661,24 @@ def scale_by_soap(
         )
 
         # Update the preconditioner
-        new_GG = [
-            _map_fn(False,
+        new_GG = jax.tree.map(
+            lambda nm, grad, gg:  _map_fn(False,
                     0,
                     nm, 
                    partial(update_preconditioner, beta = shampoo_beta),
                    grad,
                    gg
-            )
-            for nm, grad, gg in zip(jax.tree.leaves(n_dims_to_map), jax.tree.leaves(blocked_updates), state.GG)
-        ]
+            ),
+            jax.tree.leaves(n_dims_to_map),
+            jax.tree.leaves(blocked_updates),
+            state.GG
+        )
+
 
         new_Q_and_exp_avg_sq = jax.lax.cond(
             state.count % precondition_frequency == 0,
-            lambda: [_map_fn(
+            lambda: jax.tree.map(
+                lambda nm, e, gg, q: _map_fn(
                             False,
                             0,
                             nm,
@@ -678,11 +686,11 @@ def scale_by_soap(
                             gg,
                             q,
                             e
-                        ) for nm, e, gg, q in 
-                    zip(jax.tree.leaves(n_dims_to_map),
+                        ),
+                    jax.tree.leaves(n_dims_to_map),
                     jax.tree.leaves(blocked_exp_avg_sq),
                     new_GG,
-                    state.Q)]
+                    state.Q)
             ,
             lambda: [(q, e) for q, e in zip(state.Q, jax.tree.leaves(blocked_exp_avg_sq))]
         )
