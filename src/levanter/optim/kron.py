@@ -74,7 +74,6 @@ class KronConfig(OptimizerConfig):
     precond_dtype: Optional[Any] = None
     precond_update_precision: Optional[str] = "tensorfloat32"
     precond_grads_precision: Optional[str] = None
-    # scanned_layers: Optional[optax.Params] = None
     lax_map_scanned_layers: bool = False
     lax_map_batch_size: int = 8
     merge_small_dims: bool = True
@@ -113,7 +112,6 @@ class KronConfig(OptimizerConfig):
                     precond_dtype=self.precond_dtype,
                     precond_update_precision=self.precond_update_precision,
                     precond_grads_precision=self.precond_grads_precision,
-                    scanned_layers=self.scanned_layers,
                     lax_map_scanned_layers=self.lax_map_scanned_layers,
                     lax_map_batch_size=self.lax_map_batch_size,
                     merge_small_dims=self.merge_small_dims,
@@ -207,7 +205,6 @@ def scale_by_kron(
     precond_dtype: Optional[Union[str, jnp.dtype]] = None,
     precond_update_precision: Optional[str] = "tensorfloat32",
     precond_grads_precision: Optional[str] = None,
-    scanned_layers: Optional[base.Params] = None,
     lax_map_scanned_layers: bool = True,
     lax_map_batch_size: int = 8,
     merge_small_dims: bool = False,
@@ -271,10 +268,11 @@ def scale_by_kron(
     precond_dtype = canonicalize_dtype(precond_dtype or jnp.float32)
     lax_map = lax_map_scanned_layers
     bs = lax_map_batch_size
+    scanned_layers = None
 
     def init_fn(params, return_partition_specs_only=False):
         # unbox if haliax style partitioned
-        scanned_layers_ = scanned_layers
+        scanned_layers_ = None
         params_sharding_ = params_sharding
         if have_hax:
             if any(

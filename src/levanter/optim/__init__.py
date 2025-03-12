@@ -11,6 +11,12 @@ from .muon import (
     ScaleByMuonState
 )
 
+from .scion import (
+    ScionConfig,
+    ScaleByScionState
+)
+
+
 from .muon_block import(
     MuonBConfig,
     MuonBState
@@ -68,9 +74,9 @@ from .cautious import (
     CautiousConfig
 )
 
-# from .kron import (
-#     KronConfig,
-# )
+from .kron import (
+    KronConfig,
+)
 
 from .rmsprop import (
     RMSPropMomentumConfig,

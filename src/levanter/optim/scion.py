@@ -16,23 +16,20 @@ from levanter.optim.util import map_flattened_linear_layers
 from levanter.utils.jax_utils import leaf_key_paths
 
 
-@OptimizerConfig.register_subclass("muon")
+@OptimizerConfig.register_subclass("scion")
 @dataclass
-class MuonConfig(OptimizerConfig):
+class ScionConfig(OptimizerConfig):
     """
-    Muon optimizer configuration: Momentum Orthogonalized by Newton-Schulz.
+    Scion optimizer configuration: Momentum Orthogonalized by Newton-Schulz.
     """
 
     lr: float = 0.02
-    muon_to_adam_lr: float = 0.25  # Scaling factor between AdamW and Muon learning rates
+    scion_to_signum_lr: float = 0.25  # Scaling factor between AdamW and Scion learning rates
     momentum: float = 0.95
-    nesterov: bool = True
     backend_steps: int = 10  # Number of steps for Newton-Schulz orthogonalization
     weight_decay: float = 0.0
     beta1: float = 0.9
-    beta2: float = 0.95
-    epsilon: float = 1e-8
-    muon_epsilon: float = 1e-8
+    scion_epsilon: float = 1e-8
     max_grad_norm: float = 1.0
 
     def build(self, num_train_steps):
@@ -42,31 +39,31 @@ class MuonConfig(OptimizerConfig):
         learning_rate_schedule = self.lr_scheduler(num_train_steps)
 
         def optimizer(learning_rate):
-            adam_lr = learning_rate * self.muon_to_adam_lr
+            signum_lr = learning_rate * self.scion_to_signum_lr
 
-            def muon_transform():
+            def scion_transform():
                 components = []
-                components.append(scale_with_muon(self.momentum, self.nesterov, self.backend_steps, self.muon_epsilon))
+                components.append(scale_with_scion(self.momentum, self.backend_steps, self.scion_epsilon))
                 if self.weight_decay > 0:
                     components.append(optax.add_decayed_weights(self.weight_decay, self.build_weight_decay_mask()))
                 components.append(optax.scale(-learning_rate))
                 optimizer = optax.chain(*components)
                 return optimizer
 
-            def adamw_transform():
+            def signum_transform():
                 components = []
                 if self.max_grad_norm:
                     components.append(optax.clip_by_global_norm(self.max_grad_norm))
-                components.append(optax.scale_by_adam(self.beta1, self.beta2, self.epsilon))
+                components.append(scale_by_signum(self.beta1))
                 if self.weight_decay > 0:
                     components.append(optax.add_decayed_weights(self.weight_decay, self.build_weight_decay_mask()))
-                components.append(optax.scale(-adam_lr))
+                components.append(optax.scale(-signum_lr))
                 optimizer = optax.chain(*components)
                 return optimizer
 
             transformations = {
-                "muon": muon_transform(),
-                "adamw": adamw_transform(),
+                "scion": scion_transform(),
+                "signum": signum_transform(),
             }
 
             return optax.multi_transform(transformations, self.create_mask)
@@ -75,7 +72,7 @@ class MuonConfig(OptimizerConfig):
 
     def create_mask(self, params):
         """
-        Creates a mask that labels parameters as 'muon' or 'adamw' based on their
+        Creates a mask that labels parameters as 'scion' or 'signum' based on their
         dimensionality and module path, using AdamW for Embedding and lm_head parameters.
         """
         paths = leaf_key_paths(params)
@@ -83,49 +80,65 @@ class MuonConfig(OptimizerConfig):
         def mask_fn(param, path):
             path_str = ".".join(path) if isinstance(path, (list, tuple)) else str(path)
             if "Embedding" in path_str or "lm_head" in path_str:
-                return "adamw"
+                return "signum"
             elif isinstance(param, Linear):
-                # muon for linear layers
-                return dataclasses.replace(param, weight="muon", bias="adamw" if param.bias is not None else None)
+                # scion for linear layers
+                return dataclasses.replace(param, weight="scion", bias="signum" if param.bias is not None else None)
             else:
-                return "adamw"
+                return "signum"
 
         return jax.tree_util.tree_map(mask_fn, params, paths, is_leaf=lambda x: isinstance(x, Linear))
-
-
-class ScaleByMuonState(NamedTuple):
+class ScaleByScionState(NamedTuple):
     """State for the Mars algorithm."""
 
     momentum_buffer: optax.Updates
 
-
-def scale_with_muon(momentum=0.95, nesterov=True, steps=5, muon_eps = 1e-8):
+def scale_by_signum(momentum=0.95):
     def init_fn(params):
         momentum_buffer = otu.tree_zeros_like(params)  # First moment
-        return ScaleByMuonState(momentum_buffer=momentum_buffer)
+        return ScaleByScionState(momentum_buffer=momentum_buffer)
 
     def update_fn(updates, state, params=None):
         buf = state.momentum_buffer
         buf = jax.tree.map(
-            lambda m, g: None if g is None else momentum * m + g,
+            lambda m, g: None if g is None else momentum * m + (1 - momentum) * g,
             buf,
             updates,
             is_leaf=lambda x: x is None,
         )
-        if nesterov:
-            updates = jax.tree.map(
-                lambda m, g: None if g is None else momentum * m + g,
-                buf,
-                updates,
-                is_leaf=lambda x: x is None,
-            )
-        else:
-            updates = buf
+
+        updates = jax.tree_map(
+            lambda u: None if u is None else jnp.sign(u),
+            buf,
+            is_leaf=lambda x: x is None
+        )
+
+        return updates, ScaleByScionState(momentum_buffer=buf)
+
+    return optax.GradientTransformation(init_fn, update_fn)
+
+
+
+
+def scale_with_scion(momentum=0.95, steps=5, scion_eps = 1e-8):
+    def init_fn(params):
+        momentum_buffer = otu.tree_zeros_like(params)  # First moment
+        return ScaleByScionState(momentum_buffer=momentum_buffer)
+
+    def update_fn(updates, state, params=None):
+        buf = state.momentum_buffer
+        buf = jax.tree.map(
+            lambda m, g: None if g is None else momentum * m + (1 - momentum) * g,
+            buf,
+            updates,
+            is_leaf=lambda x: x is None,
+        )
+        updates = buf
 
         def transform_linear_layer(layer: haliax.nn.Linear):
             assert layer.weight.ndim == 2
 
-            updated_weight_array = zeropower_via_newtonschulz5(layer.weight.array, steps=steps, eps = muon_eps)
+            updated_weight_array = zeropower_via_newtonschulz5(layer.weight.array, steps=steps, eps = scion_eps)
 
             scale = jnp.sqrt(jnp.maximum(1, updated_weight_array.shape[0] / updated_weight_array.shape[1]))
             updated_weight_array *= scale
@@ -136,7 +149,7 @@ def scale_with_muon(momentum=0.95, nesterov=True, steps=5, muon_eps = 1e-8):
 
         updates = map_flattened_linear_layers(transform_linear_layer, updates)
 
-        return updates, ScaleByMuonState(momentum_buffer=buf)
+        return updates, ScaleByScionState(momentum_buffer=buf)
 
     return optax.GradientTransformation(init_fn, update_fn)
 
