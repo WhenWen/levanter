@@ -3,6 +3,7 @@ from typing import Optional, Sequence
 
 import jax
 import numpy as np
+import pytest
 from jax.sharding import Mesh
 
 import haliax
@@ -11,6 +12,7 @@ from haliax.partitioning import ResourceAxis
 
 from levanter.data.dataset import AsyncDataset, ListAsyncDataset
 from levanter.data.loader import DataLoader, check_sharded_consistency
+from levanter.schedule import ScheduleStep
 
 from .test_utils import skip_if_not_enough_devices
 
@@ -34,8 +36,7 @@ def test_local_batched_data_loading_model_axis_2():
 
         seq_len = 128
         cache = _small_dataset(seq_len)
-        Batch = Axis("batch", len(devices))
-        loader = DataLoader(Batch, cache, max_buffered_batches=10, mesh=mesh, axis_resources=None)
+        loader = DataLoader(cache, len(devices), max_buffered_batches=10, mesh=mesh, axis_resources=None)
 
         batches = list(loader)
         for batch in batches:
@@ -54,8 +55,7 @@ def test_local_batched_data_loading_model_axis_1():
 
         seq_len = 128
         cache = _small_dataset(seq_len)
-        Batch = Axis("batch", len(devices))
-        loader = DataLoader(Batch, cache, max_buffered_batches=10, mesh=mesh, axis_resources=None)
+        loader = DataLoader(cache, len(devices), max_buffered_batches=10, mesh=mesh, axis_resources=None)
 
         batches = list(loader)
         for batch in batches:
@@ -109,8 +109,7 @@ def test_structured_batches_model_axis_1():
     with mesh, haliax.axis_mapping({"batch": ResourceAxis.DATA}):
         seq_len = 128
         dataset = StructuredDataset(seq_len)
-        Batch = Axis("batch", len(devices))
-        loader = DataLoader(Batch, dataset, max_buffered_batches=10, mesh=mesh, axis_resources=None)
+        loader = DataLoader(dataset, len(devices), max_buffered_batches=10, mesh=mesh, axis_resources=None)
 
         batches = list(loader)
         for batch in batches:
@@ -129,8 +128,7 @@ def test_structured_batches_model_axis_2():
     with mesh, haliax.axis_mapping({"batch": ResourceAxis.DATA}):
         seq_len = 128
         dataset = StructuredDataset(seq_len)
-        Batch = Axis("batch", len(devices))
-        loader = DataLoader(Batch, dataset, max_buffered_batches=10, mesh=mesh, axis_resources=None)
+        loader = DataLoader(dataset, len(devices), max_buffered_batches=10, mesh=mesh, axis_resources=None)
 
         batches = list(loader)
         for batch in batches:
@@ -198,12 +196,41 @@ def test_structured_batches_model_axis_1_with_names():
         Height = Axis("Height", 16)
         Width = Axis("Width", 16)
         dataset = StructuredDatasetWithNames(Height, Width, 0, len(devices) * 10, 1)
-        Batch = Axis("batch", len(devices))
-        loader = DataLoader(Batch, dataset, max_buffered_batches=10, mesh=mesh, axis_resources=None)
+        loader = DataLoader(dataset, len(devices), max_buffered_batches=0, mesh=mesh, axis_resources=None)
 
         batches = list(loader)
         for batch in batches:
             check_sharded_consistency(batch, check_disjoint_indices_are_different=True)
+
+        assert len(batches) == 10
+
+
+@skip_if_not_enough_devices(2)
+def test_structured_batches_model_axis_1_non_divisible_batch_size():
+    devices = jax.devices()
+    model_axis_size = 1
+
+    mesh = Mesh(
+        np.array(devices).reshape(-1, model_axis_size),
+        (ResourceAxis.DATA, ResourceAxis.MODEL),
+    )
+    with mesh, haliax.axis_mapping({"batch": ResourceAxis.DATA}):
+        Height = Axis("Height", 16)
+        Width = Axis("Width", 16)
+        dataset = StructuredDatasetWithNames(Height, Width, 0, 10, 1)
+        loader = DataLoader(
+            dataset, 1, max_buffered_batches=0, mesh=mesh, axis_resources=None, allow_nondivisible_batch_size=True
+        )
+
+        batches = list(loader)
+        for batch in batches:
+            check_sharded_consistency(batch, check_disjoint_indices_are_different=False)
+
+        # check that it crashes if allow_non_divisible_batch_size is False
+        with pytest.raises(ValueError):
+            DataLoader(
+                dataset, 1, max_buffered_batches=0, mesh=mesh, axis_resources=None, allow_nondivisible_batch_size=False
+            )
 
         assert len(batches) == 10
 
@@ -221,8 +248,7 @@ def test_structured_batches_model_axis_2_with_names():
         Height = Axis("Height", 16)
         Width = Axis("Width", 16)
         dataset = StructuredDatasetWithNames(Height, Width, 0, 256, 1)
-        Batch = Axis("batch", len(devices))
-        loader = DataLoader(Batch, dataset, max_buffered_batches=10, mesh=mesh, axis_resources=None)
+        loader = DataLoader(dataset, len(devices), max_buffered_batches=10, mesh=mesh, axis_resources=None)
 
         batches = list(loader)
         for batch in batches:
@@ -243,8 +269,85 @@ def test_structured_batches_model_axis_2_subsharded():
     Width = Axis("Width", 16)
     with mesh, haliax.axis_mapping({"batch": ResourceAxis.DATA, Height.name: ResourceAxis.MODEL}):
         dataset = StructuredDatasetWithNames(Height, Width, 0, 256, 1)
-        Batch = Axis("batch", len(devices))
-        loader = DataLoader(Batch, dataset, max_buffered_batches=10, mesh=mesh, axis_resources=None)
+        loader = DataLoader(dataset, len(devices), max_buffered_batches=10, mesh=mesh, axis_resources=None)
 
         for batch in iter(loader):
             check_sharded_consistency(batch, check_disjoint_indices_are_different=True)
+
+
+@pytest.mark.parametrize("model_axis_size", [1, 2])
+def test_loader_with_batch_scheduler(model_axis_size):
+    schedule = [ScheduleStep(start=0, value=8), ScheduleStep(start=10, value=16), ScheduleStep(start=20, value=32)]
+
+    if len(jax.devices()) % model_axis_size != 0:
+        pytest.skip("This test requires the number of devices to divide model_axis_size")
+
+    if 32 % (len(jax.devices()) // model_axis_size) != 0:
+        pytest.skip("This test requires the number of devices to divide 32")
+
+    devices = jax.devices()
+
+    mesh = Mesh(
+        np.array(devices).reshape(-1, model_axis_size),
+        (ResourceAxis.DATA, ResourceAxis.MODEL),
+    )
+
+    with mesh, haliax.axis_mapping({"batch": ResourceAxis.DATA}):
+        seq_len = 128
+        cache = _small_dataset(seq_len, num_sequences=1000)
+        loader = DataLoader(
+            cache, schedule, max_buffered_batches=10, mesh=mesh, axis_resources=None, pad_final_batch=False
+        )
+
+        for step, batch in enumerate(loader):
+            if step < 10:
+                assert len(batch) == 8
+            elif step < 20:
+                assert len(batch) == 16
+            else:
+                assert len(batch) == 32, f"step: {step} len: {len(batch)}"
+
+        # total steps: 10 * 8 + 10 * 16 = 240, (1000 - 240) // 32 = 23
+        assert step == 20 + 22
+
+
+@pytest.mark.parametrize("model_axis_size", [1, 2])
+def test_padded_final_batch(model_axis_size):
+    schedule = [ScheduleStep(start=0, value=8), ScheduleStep(start=10, value=16), ScheduleStep(start=20, value=32)]
+
+    if len(jax.devices()) % model_axis_size != 0:
+        pytest.skip("This test requires the number of devices to divide model_axis_size")
+
+    if 32 % (len(jax.devices()) // model_axis_size) != 0:
+        pytest.skip("This test requires the number of devices to divide 32")
+
+    devices = jax.devices()
+
+    mesh = Mesh(
+        np.array(devices).reshape(-1, model_axis_size),
+        (ResourceAxis.DATA, ResourceAxis.MODEL),
+    )
+
+    with mesh, haliax.axis_mapping({"batch": ResourceAxis.DATA}):
+        seq_len = 128
+        cache = _small_dataset(seq_len, num_sequences=1007)
+        loader = DataLoader(
+            cache, schedule, max_buffered_batches=10, mesh=mesh, axis_resources=None, pad_final_batch=True
+        )
+
+        for step, batch in enumerate(loader):
+            if step < 10:
+                assert len(batch) == 8
+            elif step < 20:
+                assert len(batch) == 16
+            else:
+                assert len(batch) == 32
+
+        # total steps: 10 * 8 + 10 * 16 = 240, (1007 - 240) // 32 = 23
+        assert step == 20 + 23
+
+        # last batch should be padded
+        assert len(batch) == 32
+        # ensure all the padded examples are all 0's
+        num_padding = 32 - (1007 - 240) % 32
+        assert np.all(batch[-num_padding:] == 0)

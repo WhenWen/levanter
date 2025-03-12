@@ -33,11 +33,12 @@ class EmaModelAveraging(ModelAveraging[M]):
     """
 
     model: M
-    beta: float = eqx.static_field()
+    beta: float = eqx.field(static=True)
 
     def update(self: S, new_model: M, step: int) -> S:
         del step
-        return dataclasses.replace(self, model=optax.incremental_update(new_model, self.model, self.beta))  # type: ignore
+        # 1 - beta because increment_update expects the weight of the new model
+        return dataclasses.replace(self, model=optax.incremental_update(new_model, self.model, 1 - self.beta))  # type: ignore
 
     @property
     def model_params(self) -> M:
