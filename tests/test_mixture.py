@@ -3,7 +3,8 @@ import numpy as np
 import pytest
 
 from levanter.data import ListAsyncDataset, MixtureDataset
-from levanter.data.mixture import StopStrategy
+from levanter.data.mixture import StopStrategy, rescale_mixture_schedule_for_batch_schedule
+from levanter.schedule import BatchSchedule, ScheduleStep
 
 
 def datasets():
@@ -71,6 +72,36 @@ async def test_mixture_dataset_stop_strategy_restart():
 
     with pytest.raises(ValueError):
         await mixture_ds.async_len()
+
+
+@pytest.mark.asyncio
+async def test_mixture_dataset_simulated_data_size():
+    weights = {"ds1": 1 / 3, "ds2": 1 / 3, "ds3": 1 / 3}
+    mixture_ds = MixtureDataset(
+        {name: dataset.slice_dataset(end_index=1) for name, dataset in datasets().items()},
+        weights,
+        block_size=10,
+        key=key(),
+        randomize_blocks=False,
+        stop_strategy=StopStrategy.RESTART_STRATEGY,
+    )
+    for _ in range(10):
+        batch = await mixture_ds.get_batch([0, 1, 2])
+        assert len(batch) == 3
+        assert all(item in [1, 10, 100] for item in batch)
+
+    mixture_ds = MixtureDataset(
+        {name: dataset.slice_dataset(end_index=2) for name, dataset in datasets().items()},
+        weights,
+        block_size=10,
+        key=key(),
+        randomize_blocks=False,
+        stop_strategy=StopStrategy.RESTART_STRATEGY,
+    )
+    for _ in range(10):
+        batch = await mixture_ds.get_batch([0, 1, 2])
+        assert len(batch) == 3
+        assert all(item in [1, 2, 10, 20, 100, 200] for item in batch)
 
 
 @pytest.mark.asyncio
@@ -155,3 +186,22 @@ async def test_mixture_dataset_samples_all_elements():
 
     assert len(samples) == num_samples
     assert set(samples) == {1, 2, 3, 4, 5, 10, 20, 30, 40, 50, 100, 200, 300, 400, 500}
+
+
+def test_rescale_mixture_schedule_for_batch_schedule():
+    mixture_schedule = [(0, {"ds1": 0.5, "ds2": 0.5}), (10, {"ds1": 0.2, "ds2": 0.8})]
+    batch_schedule = BatchSchedule([ScheduleStep(start=0, value=10), ScheduleStep(start=5, value=20)])
+
+    rescaled_schedule = rescale_mixture_schedule_for_batch_schedule(mixture_schedule, batch_schedule)
+
+    expected_schedule = [(0, {"ds1": 0.5, "ds2": 0.5}), (150, {"ds1": 0.2, "ds2": 0.8})]
+    assert rescaled_schedule == expected_schedule
+
+    # double check changing on the cusp
+    batch_schedule = BatchSchedule([ScheduleStep(start=0, value=10), ScheduleStep(start=10, value=20)])
+
+    rescaled_schedule = rescale_mixture_schedule_for_batch_schedule(mixture_schedule, batch_schedule)
+
+    expected_schedule = [(0, {"ds1": 0.5, "ds2": 0.5}), (100, {"ds1": 0.2, "ds2": 0.8})]
+
+    assert rescaled_schedule == expected_schedule
