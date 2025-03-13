@@ -532,3 +532,46 @@ def summary_statistics_for_tree(
         to_log[f"{prefix}/hist/{key}"] = value
 
     return to_log
+
+
+class OptStateWatchCallback(JitCallback[S, M, dict[str, float | Histogram]]):
+    """
+    Monitors optimizer state statistics.
+
+    Args:
+        prefix (str): The prefix to use for logging.
+        include_histogram (bool): Whether to include histograms of the optimizer states.
+        split_scan_layers (bool): Whether to split the scan layers into separate histograms/norms
+    """
+
+    def __init__(
+        self,
+        prefix: str = "opt_state",
+        include_histogram: bool = True,
+        split_scan_layers: bool = True,
+    ):
+        self.prefix = prefix
+        self.include_histogram = include_histogram
+        self.split_scan_layers = split_scan_layers
+
+    def inside_step(self, state: TrainerState[M], grad: M):
+        # Flatten the optimizer state tree and get paths
+        top_level_states, _ = jax.tree_util.tree_flatten_with_path(
+            state.opt_state, 
+            is_leaf=lambda m: isinstance(m, type(state.model))
+        )
+        
+        stats = {}
+        for path, value in top_level_states:
+            # Convert path to string
+            path_str = "/".join(str(p) for p in path)
+            stats.update(summary_statistics_for_tree(
+                f"{self.prefix}/{path_str}",
+                value,
+                self.split_scan_layers,
+                self.include_histogram
+            ))
+        return stats
+
+    def on_step(self, step_info: StepInfo[S], cb_info: dict[str, float | Histogram]):
+        levanter.tracker.log(cb_info, step=step_info.step)
