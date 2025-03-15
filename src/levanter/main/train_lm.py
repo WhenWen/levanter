@@ -250,8 +250,8 @@ def main(config: TrainLmConfig):
         )
 
         # Add gradient and optimizer state monitoring
-        trainer.add_hook(callbacks.GradWatchCallback(include_histogram=True), every=5)
-        trainer.add_hook(callbacks.OptStateWatchCallback(include_histogram=True), every=5)
+        # trainer.add_hook(callbacks.GradWatchCallback(include_histogram=True), every=5)
+        # trainer.add_hook(callbacks.OptStateWatchCallback(include_histogram=True), every=5)
 
         if config.hf_save_path is not None:
             # bit gross to reach this far into the config, but it's fine

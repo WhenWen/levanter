@@ -1,5 +1,5 @@
 eval $(ssh-agent -s)
-bash infra/babysit-tpu-vm.sh muadambase -z us-central2-b -t v4-256 --preemptible -- \
+bash infra/babysit-tpu-vm.sh muon -z us-central2-b -t v4-64 --preemptible -- \
 WANDB_API_KEY=1c85c63399be786e59026e288175122f49a434b0 \
 bash levanter/infra/run.sh python \
 levanter/src/levanter/main/train_lm.py \
