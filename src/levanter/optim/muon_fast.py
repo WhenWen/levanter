@@ -99,9 +99,12 @@ class ScaleByMuonState(NamedTuple):
     momentum_buffer: optax.Updates
 
 
-def scale_with_muon(momentum=0.95, nesterov=True, steps=5, muon_eps = 1e-8):
+def scale_with_muon(momentum=0.95, nesterov=True, steps=5, muon_eps=1e-8):
+    # Convert steps to concrete int at function definition time
+    steps = int(steps)
+    
     def init_fn(params):
-        momentum_buffer = otu.tree_zeros_like(params)  # First moment
+        momentum_buffer = otu.tree_zeros_like(params)
         return ScaleByMuonState(momentum_buffer=momentum_buffer)
 
     def update_fn(updates, state, params=None):
@@ -124,8 +127,8 @@ def scale_with_muon(momentum=0.95, nesterov=True, steps=5, muon_eps = 1e-8):
 
         def transform_linear_layer(layer: haliax.nn.Linear):
             assert layer.weight.ndim == 2
-
-            updated_weight_array = zeropower_via_newtonschulz5(layer.weight.array, steps=steps, eps = muon_eps)
+            # steps is now a concrete int
+            updated_weight_array = zeropower_via_newtonschulz5(layer.weight.array, steps=steps, eps=muon_eps)
 
             scale = jnp.sqrt(jnp.maximum(1, updated_weight_array.shape[0] / updated_weight_array.shape[1]))
             updated_weight_array *= scale
@@ -152,12 +155,16 @@ def zeropower_via_newtonschulz5(X, steps=10, eps=1e-7):
     X = X / (jnp.linalg.norm(X) + eps)
     use_alt_pattern = X.shape[0] > X.shape[1]
     
-    def step_fn(X, _):
+    def step_fn(carry, _):
+        X = carry
         if use_alt_pattern:
-            # For tall matrices (m > n), equivalent to (X.T @ X)
+            # For tall matrices (m > n), we work in the smaller dimension space
+            # XXT is effectively X.T @ X with shape (n, n)
             XXT = jnp.einsum('ji,jk->ik', X, X)
             A_squared = jnp.einsum('ij,jk->ik', XXT, XXT)
-            X_new = a * X + jnp.einsum('ki,jk->ji', X, (b * XXT + c * A_squared))
+            # Correct einsum for X of shape (m,n) and (b*XXT + c*A_squared) of shape (n,n)
+            # The result should be of shape (m,n)
+            X_new = a * X + jnp.einsum('jk,ki->ji', X, (b * XXT + c * A_squared))
         else:
             # For wide matrices (m ≤ n)
             XXT = jnp.einsum('ij,kj->ik', X, X)
@@ -165,5 +172,5 @@ def zeropower_via_newtonschulz5(X, steps=10, eps=1e-7):
             X_new = a * X + jnp.einsum('ij,jk->ik', (b * XXT + c * A_squared), X)
         return X_new, None
     
-    X, _ = jax.lax.scan(step_fn, X, None, length=steps)
+    X, _ = jax.lax.scan(step_fn, X, None, length=10)
     return X

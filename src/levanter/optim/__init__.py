@@ -6,6 +6,12 @@ from .sophia import (  # SophiaGConfig,; SophiaGObjective,
     scale_by_sophia_g,
     scale_by_sophia_h,
 )
+
+from .adam_mini import (
+    MiniConfig,
+    ScaleByMiniState
+)
+
 from .muon_fast import (
     MuonConfig,
     ScaleByMuonState
