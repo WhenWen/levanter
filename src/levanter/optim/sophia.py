@@ -8,6 +8,7 @@ import jax
 import jaxtyping
 import optax
 from jax import numpy as jnp
+from jax.random import PRNGKey
 from jaxtyping import PRNGKeyArray
 
 import levanter.tracker
