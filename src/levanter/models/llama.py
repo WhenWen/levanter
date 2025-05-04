@@ -45,6 +45,8 @@ class LlamaConfig(HFCompatConfig):
             Note that num_heads must be divisible by this number. Defaults to 32.
         activation_function (str, optional): activation function for the hidden layer. Defaults to "silu".
         rope_scaling (Dict, optional): dict containing the scaling configuration for the Rotary Positional Embedding.
+        hybrid_norm (bool, optional): whether to use hybrid normalization with additional layer norms after attention and MLP. Defaults to False.
+        input_embedding_norm (bool, optional): whether to use layer normalization after input embeddings. Defaults to False.
     """
 
     seq_len: int = 2048
@@ -57,6 +59,8 @@ class LlamaConfig(HFCompatConfig):
     initializer_range: float = 0.02
     layer_norm_epsilon: float = 1e-5
     tie_word_embeddings: bool = False
+    hybrid_norm: bool = False
+    input_embedding_norm: bool = False
 
     # Attention-related config
     upcast_attn: bool = False
@@ -71,7 +75,7 @@ class LlamaConfig(HFCompatConfig):
     use_layer_norm_weight: bool = True
     rope: RotaryEmbeddingsConfig = dataclasses.field(default_factory=DefaultRotaryEmbeddingsConfig)
 
-    reference_checkpoint: str = "NousResearch/Llama-2-7b-hf"
+    reference_checkpoint: str = "meta-llama/Llama-2-7b-hf"
     tokenizer: Optional[str] = None
 
     # Axis
@@ -277,6 +281,8 @@ class LlamaDecoderLayer(eqx.Module):
     mlp: LlamaMlp
     input_layernorm: hnn.RmsNorm
     post_attention_layernorm: hnn.RmsNorm
+    post_attn_layernorm: Optional[hnn.RmsNorm] = None
+    post_mlp_layernorm: Optional[hnn.RmsNorm] = None
 
     @staticmethod
     def init(config: LlamaConfig, *, key) -> "LlamaDecoderLayer":
@@ -292,8 +298,14 @@ class LlamaDecoderLayer(eqx.Module):
         )
         ln_1 = config.mk_LayerNorm(config.Embed)
         ln_2 = config.mk_LayerNorm(config.Embed)
+        
+        post_attn_ln = None
+        post_mlp_ln = None
+        if config.hybrid_norm:
+            post_attn_ln = config.mk_LayerNorm(config.Embed)
+            post_mlp_ln = config.mk_LayerNorm(config.Embed)
 
-        return LlamaDecoderLayer(config, attn, mlp, ln_1, ln_2)
+        return LlamaDecoderLayer(config, attn, mlp, ln_1, ln_2, post_attn_ln, post_mlp_ln)
 
     @named_call
     def __call__(self, x: NamedArray, mask: Optional[NamedArray | AttentionMask], *, key=None) -> NamedArray:
@@ -302,12 +314,16 @@ class LlamaDecoderLayer(eqx.Module):
         residual = x
         x = self.input_layernorm(x)
         attn_output = self.self_attn(x=x, mask=mask, key=k_attn)
+        if self.post_attn_layernorm is not None:
+            attn_output = self.post_attn_layernorm(attn_output)
         x = residual + attn_output
 
         # MLP and skip connection
         residual = x
         x = self.post_attention_layernorm(x)
         mlp_output = self.mlp(x, key=k_mlp)
+        if self.post_mlp_layernorm is not None:
+            mlp_output = self.post_mlp_layernorm(mlp_output)
         output = residual + mlp_output
         return output
 
@@ -348,18 +364,31 @@ class LlamaEmbedding(ModuleWithStateDictSerialization, eqx.Module):
     - Llama doesn't use dropout.
     """
 
-    Vocab: Axis = eqx.field(static=True)
     token_embeddings: hnn.Embedding
+    norm: Optional[hnn.RmsNorm] = None
 
     @staticmethod
     def init(Vocab: Axis, config: LlamaConfig, *, key) -> "LlamaEmbedding":
-        return LlamaEmbedding(Vocab, hnn.Embedding.init(Vocab, config.Embed, key=key))
+        token_embeddings = hnn.Embedding.init(Vocab, config.Embed, key=key)
+        norm = None
+        if config.input_embedding_norm:
+            norm = config.mk_LayerNorm(config.Embed)
+        return LlamaEmbedding(token_embeddings, norm)
+
+    @property
+    def Vocab(self) -> Axis:
+        return self.token_embeddings.Vocab
+
+    @property
+    def Embed(self) -> Axis:
+        return self.token_embeddings.Embed
 
     @named_call
     def embed(self, input_ids, *args):
         input_embeds = self.token_embeddings(input_ids)
-        x = input_embeds
-        return x
+        if self.norm is not None:
+            input_embeds = self.norm(input_embeds)
+        return input_embeds
 
     def unembed(self, x: NamedArray):
         return self.token_embeddings.unembed(x)

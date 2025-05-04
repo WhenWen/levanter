@@ -28,7 +28,7 @@ class SoapConfig(OptimizerConfig):
     beta1: float = 0.95
     beta2: float = 0.95
     shampoo_beta: float = 0.95
-    eps: float = 1e-8
+    epsilon: float = 1e-8
     max_grad_norm: Optional[float] = 1.0
     haps: Optional[list[int]] = None
     schedule_list: Optional[list[str]] = None
@@ -53,7 +53,7 @@ class SoapConfig(OptimizerConfig):
             b1=self.beta1,
             b2=self.beta2,
             shampoo_beta=self.shampoo_beta,
-            eps=self.eps,
+            epsilon=self.epsilon,
             precondition_frequency=self.precondition_frequency,
             max_precond_dim=self.max_precond_dim,
             merge_small_dims=self.merge_small_dims,
@@ -102,7 +102,7 @@ def scale_by_soap(
     b1: float = 0.95,
     b2: float = 0.95,
     shampoo_beta: float = -1,
-    eps: float = 1e-8,
+    epsilon: float = 1e-8,
     precondition_frequency: int = 1,
     max_precond_dim: int = 10000,
     precision: jax.lax.PrecisionLike = jax.lax.Precision.HIGHEST,
@@ -124,7 +124,7 @@ def scale_by_soap(
         b2 (float, optional): Adam's beta2 parameter. Defaults to 0.95.
         shampoo_beta (float, optional): If >= 0, use this beta for the preconditioner (`L` and `R` in paper, `GG` below)
             moving average instead of b2. Defaults to -1.
-        eps (float, optional): Adam's epsilon for numerical stability. Defaults to 1e-8.
+        epsilon (float, optional): Adam's epsilonilon for numerical stability. Defaults to 1e-8.
         precondition_frequency (int, optional): How often to update the preconditioner. Defaults to 10.
         max_precond_dim (int, optional): Maximum dimension of the preconditioner.
             Set to 10000 to exclude most common vocab sizes while including layers. Defaults to 10000.
@@ -410,7 +410,7 @@ def scale_by_soap(
             lambda nm, gg: _map_fn(False,
                     0,
                     nm,
-                    partial(get_orthogonal_matrix, eps = eps),
+                    partial(get_orthogonal_matrix, epsilon = epsilon),
                    gg
             ),
             n_dims_to_map,
@@ -637,7 +637,7 @@ def scale_by_soap(
                 0,
                 nm,
                 partial(project_back, precision = precision),
-                (e_avg / (jnp.sqrt(e_avg_sq) + eps)),
+                (e_avg / (jnp.sqrt(e_avg_sq) + epsilon)),
                 q
             ),
             dummy_updates_tree,
@@ -905,13 +905,13 @@ def project_back(
     return grad
 
 
-def get_orthogonal_matrix(GG: List[Union[Array, None]], eps: float) -> List[Union[Array, None]]:
+def get_orthogonal_matrix(GG: List[Union[Array, None]], epsilon: float) -> List[Union[Array, None]]:
     Q = []
     for gg in GG:
         if gg is None:
             Q.append(None)
         else:
-            _, eigh = jnp.linalg.eigh(gg + eps * jnp.eye(gg.shape[0]))
+            _, eigh = jnp.linalg.eigh(gg + epsilon * jnp.eye(gg.shape[0]))
             Q.append(jnp.flip(eigh, axis=1))
     return Q
 
